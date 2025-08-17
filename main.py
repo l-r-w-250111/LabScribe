@@ -1,14 +1,16 @@
 import re # For regular expressions
 import os # For path manipulation
 import sys
+import time
 import json
 import uuid
 import tempfile
 import base64
 import subprocess
 import matplotlib
+import requests
 from datetime import datetime
-from PyQt6.QtCore import Qt, QMimeData, QPoint, QUrl, QEvent, QTimer
+from PyQt6.QtCore import Qt, QMimeData, QPoint, QUrl, QEvent, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QDrag, QPainter, QPixmap, QKeySequence, QAction
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -20,7 +22,9 @@ from PyQt6.QtWidgets import (
 # Local imports
 from chart_widget import ChartWidget
 from table_widget import TableWidget
+from gantt_chart_widget import GanttChartWidget
 from settings import Settings
+import config
 
 # External imports
 import markdown # For Markdown to HTML conversion
@@ -31,6 +35,7 @@ MOVE_MIME_TYPE = "application/x-eln-move-module"
 CHART_MODULE_TYPE = "Chart" # Renamed
 TABLE_MODULE_TYPE = "Table"       # New
 MARKDOWN_MODULE_TYPE = "Markdown/Mermaid" # New
+GANTT_CHART_MODULE_TYPE = "Gantt Chart"
 
 # --- Base Draggable Module ---
 class BaseModuleWidget(QFrame):
@@ -171,6 +176,106 @@ class ChartModuleWidget(BaseModuleWidget):
             self.content["y_series"] = y_series
             self.chart_widget.update_plot(x_data, y_series)
             self.main_window.update_module_content(self.module_id, self.content)
+
+
+# --- Gantt Chart Module ---
+class GanttChartModuleWidget(BaseModuleWidget):
+    def __init__(self, module_id, module_type, content, window, parent=None):
+        super().__init__(module_id, module_type, window, parent)
+
+        # content is now a dictionary
+        if isinstance(content, str): # Handle legacy format
+            self.content = {"data": content, "height": 300}
+        else:
+            self.content = content or {"data": "", "height": 300}
+
+        # --- Controls ---
+        controls_widget = QFrame()
+        controls_layout = QVBoxLayout(controls_widget)
+        
+        # Data Editor
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlainText(self.content.get("data", ""))
+        self.text_edit.textChanged.connect(self.on_text_changed)
+        self.text_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+        controls_layout.addWidget(self.text_edit)
+
+        # Helper Text Label
+        help_label = QLabel("Enter tasks: Task Name,YYYY-MM-DD,YYYY-MM-DD")
+        help_label.setStyleSheet("font-size: 12px; color: #999;")
+        controls_layout.addWidget(help_label)
+
+        # Update Button
+        self.update_button = QPushButton("Update Chart")
+        self.update_button.clicked.connect(self.update_chart)
+        controls_layout.addWidget(self.update_button)
+
+        self.main_layout.addWidget(controls_widget)
+
+        # --- Chart Widget ---
+        self.gantt_chart_widget = GanttChartWidget()
+        initial_height = self.content.get("height", 300)
+        self.gantt_chart_widget.setMinimumHeight(initial_height)
+        self.main_layout.addWidget(self.gantt_chart_widget, 1)
+        
+        # --- Resize Handle ---
+        self.resize_handle = QFrame()
+        self.resize_handle.setFixedHeight(10)
+        self.resize_handle.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.resize_handle.setStyleSheet("background-color: #555;")
+        self.main_layout.addWidget(self.resize_handle)
+        self.resize_handle.installEventFilter(self)
+        self.is_resizing = False
+
+        # Initial plot
+        self.update_chart()
+        
+        # Adjust height after layout is processed
+        QTimer.singleShot(0, self.adjust_text_area_height)
+
+    def eventFilter(self, source, event):
+        # Handle the title bar drag event first
+        if source is self.title_label:
+            return super().eventFilter(source, event)
+
+        if hasattr(self, 'resize_handle') and source is self.resize_handle:
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self.is_resizing = True
+                self.resize_start_pos = event.globalPosition().toPoint()
+                self.resize_start_height = self.gantt_chart_widget.height()
+                return True
+            elif event.type() == QEvent.Type.MouseMove and self.is_resizing:
+                delta = event.globalPosition().toPoint() - self.resize_start_pos
+                new_height = self.resize_start_height + delta.y()
+                if new_height > 100: # Minimum height
+                    self.gantt_chart_widget.setMinimumHeight(new_height)
+                return True
+            elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                if self.is_resizing:
+                    self.is_resizing = False
+                    self.content["height"] = self.gantt_chart_widget.height()
+                    self.main_window.update_module_content(self.module_id, self.content)
+                    return True
+        
+        return super().eventFilter(source, event)
+
+    def on_text_changed(self):
+        self.content["data"] = self.text_edit.toPlainText()
+        self.main_window.update_module_content(self.module_id, self.content)
+        self.adjust_text_area_height()
+
+    def adjust_text_area_height(self):
+        doc_height = self.text_edit.document().size().height()
+        # Set height based on content, with a minimum for approx. 2 lines and padding
+        font_metrics = self.text_edit.fontMetrics()
+        min_height = font_metrics.lineSpacing() * 2 + 25 # 2 lines + padding
+        self.text_edit.setFixedHeight(max(int(doc_height + 20), int(min_height)))
+
+    def update_chart(self):
+        data = self.content.get("data", "")
+        lines = data.strip().split('\n')
+        # Pass the raw lines to the widget; it will handle all parsing.
+        self.gantt_chart_widget.update_plot(lines)
 
 
 # --- Table Module ---
@@ -399,6 +504,59 @@ class DraggableModuleList(QListWidget):
         drag.setMimeData(mime_data)
         drag.exec(supportedActions)
 
+# --- AI Summary Worker ---
+class SummaryWorker(QThread):
+    summary_ready = pyqtSignal(str, str) # module_id, summary_text
+    finished = pyqtSignal()
+
+    def __init__(self, modules, parent=None):
+        super().__init__(parent)
+        self.modules = modules
+
+    def run(self):
+        """Generates summaries for all modules by calling the Ollama API."""
+        for module in self.modules:
+            module_id = module.get("module_id")
+            content = module.get("content")
+            
+            if not content or not isinstance(content, (str, dict, list)):
+                continue
+
+            # Serialize content to a string for the prompt
+            prompt_content = json.dumps(content) if not isinstance(content, str) else content
+            
+            prompt = f"Summarize the following lab note content in under 80 characters, focusing on the key information: {prompt_content}"
+
+            try:
+                payload = {
+                    "model": config.SUMMARY_GENERATOR_MODEL,
+                    "prompt": prompt,
+                    "stream": True
+                }
+                
+                with requests.post(config.OLLAMA_API_URL, json=payload, stream=True) as response:
+                    response.raise_for_status()
+                    
+                    full_summary = ""
+                    for line in response.iter_lines():
+                        if line:
+                            try:
+                                chunk = json.loads(line)
+                                full_summary += chunk.get("response", "")
+                                if chunk.get("done"):
+                                    break
+                            except json.JSONDecodeError:
+                                print(f"Warning: Could not decode JSON line: {line}")
+                                continue
+                    
+                    self.summary_ready.emit(module_id, full_summary.strip())
+
+            except requests.exceptions.RequestException as e:
+                print(f"Error calling Ollama API: {e}")
+                self.summary_ready.emit(module_id, f"Error: {e}")
+            
+        self.finished.emit()
+
 # --- Main Application ---
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -421,6 +579,7 @@ class MainWindow(QMainWindow):
         self.repopulate_modules()
         self.update_outline()
         self.update_window_title()
+        self.summary_worker = None
 
     def setup_left_frame(self):
         self.left_frame = QFrame()
@@ -444,7 +603,7 @@ class MainWindow(QMainWindow):
         modules_layout = QVBoxLayout(self.modules_group)
         self.module_list_widget = DraggableModuleList()
         self.module_list_widget.setDragEnabled(True)
-        self.available_modules = ["Purpose", "Conditions", "Results", "Conclusion", "Discussion", CHART_MODULE_TYPE, TABLE_MODULE_TYPE, MARKDOWN_MODULE_TYPE]
+        self.available_modules = ["Purpose", "Conditions", "Results", "Conclusion", "Discussion", CHART_MODULE_TYPE, TABLE_MODULE_TYPE, GANTT_CHART_MODULE_TYPE, MARKDOWN_MODULE_TYPE]
         self.module_list_widget.addItems(self.available_modules)
         modules_layout.addWidget(self.module_list_widget)
         self.left_layout.addWidget(self.modules_group)
@@ -517,14 +676,23 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(toolbar)
 
         # --- Outline ---
-        outline_group = QGroupBox("Outline")
-        outline_layout = QVBoxLayout(outline_group)
+        # Create a header for the outline panel
+        outline_header_layout = QHBoxLayout()
+        outline_header_layout.addWidget(QLabel("<b>Outline</b>"))
+        outline_header_layout.addStretch()
+        self.generate_summary_button = QPushButton("Generate Summary")
+        self.generate_summary_button.clicked.connect(self.generate_summaries)
+        outline_header_layout.addWidget(self.generate_summary_button)
+        right_layout.addLayout(outline_header_layout)
+
+        # Create the outline groupbox (without a title)
+        self.outline_group = QGroupBox()
+        outline_layout = QVBoxLayout(self.outline_group)
         self.outline_browser = QTextBrowser()
         self.outline_browser.setOpenLinks(False)
         self.outline_browser.anchorClicked.connect(self.scroll_to_module)
         outline_layout.addWidget(self.outline_browser)
-        outline_group.setFixedHeight(150)
-        right_layout.addWidget(outline_group)
+        right_layout.addWidget(self.outline_group)
 
         # --- Editor Area ---
         self.scroll_area = QScrollArea()
@@ -550,6 +718,9 @@ class MainWindow(QMainWindow):
         if module_type == CHART_MODULE_TYPE:
             chart_content = content if isinstance(content, dict) else {}
             widget = ChartModuleWidget(module_id, module_type, chart_content, self)
+        elif module_type == GANTT_CHART_MODULE_TYPE:
+            gantt_content = content if isinstance(content, dict) else {}
+            widget = GanttChartModuleWidget(module_id, module_type, gantt_content, self)
         elif module_type == TABLE_MODULE_TYPE:
             table_content = content if isinstance(content, list) else [["" for _ in range(4)] for _ in range(4)]
             widget = TableModuleWidget(module_id, module_type, table_content, self)
@@ -564,7 +735,9 @@ class MainWindow(QMainWindow):
 
         if is_new_module:
             if module_type == CHART_MODULE_TYPE:
-                content = {"x_data": [], "y_series": []}
+                content = {"x_data": [], "y_series": [], "height": 300}
+            elif module_type == GANTT_CHART_MODULE_TYPE:
+                content = {"data": "Task A,2024-01-01,2024-01-05\nTask B,2024-01-03,2024-01-08", "height": 300}
             elif module_type == TABLE_MODULE_TYPE:
                 content = self.module_widgets[module_id].table_widget.get_data()
             else: # For text modules
@@ -600,18 +773,58 @@ class MainWindow(QMainWindow):
             self.note_data["modules"] = [m for m in self.note_data["modules"] if m["module_id"] != module_id]
             self.update_outline()
 
+    def generate_summaries(self):
+        """Starts the background thread to generate summaries for all modules."""
+        self.generate_summary_button.setEnabled(False)
+        self.generate_summary_button.setText("Generating...")
+        
+        # Pass a copy of the modules list to the worker
+        self.summary_worker = SummaryWorker(modules=list(self.note_data["modules"]))
+        self.summary_worker.summary_ready.connect(self.on_summary_ready)
+        self.summary_worker.finished.connect(self.on_summary_finished)
+        self.summary_worker.start()
+
+    def on_summary_ready(self, module_id, summary):
+        """Updates the note_data with the received summary."""
+        for module in self.note_data["modules"]:
+            if module["module_id"] == module_id:
+                module["summary"] = summary
+                # We can update the outline incrementally here if we want
+                # self.update_outline() 
+                break
+
+    def on_summary_finished(self):
+        """Called when the summary worker thread has finished."""
+        self.generate_summary_button.setEnabled(True)
+        self.generate_summary_button.setText("Generate Summary")
+        self.update_outline() # Refresh the outline with all new summaries
+        self.summary_worker = None # Clean up the worker
+
     def update_module_content(self, module_id, new_content):
         for module in self.note_data["modules"]:
             if module["module_id"] == module_id:
                 module["content"] = new_content
-                break
+                # When content changes, the summary is no longer valid
+                if "summary" in module:
+                    del module["summary"]
+        self.update_outline()
+
+    def adjust_outline_height(self):
+        doc_height = self.outline_browser.document().size().height()
+        font_metrics = self.outline_browser.fontMetrics()
+        min_height = font_metrics.lineSpacing() + 25 # Min height for approx 1 line + padding
+        # Add extra padding to the group box itself
+        self.outline_group.setFixedHeight(max(int(doc_height + 40), int(min_height)))
 
     def update_outline(self):
         self.outline_browser.clear()
         html = ""
         for module in self.note_data["modules"]:
-            html += f'<a href="#{module["module_id"]}" style="text-decoration:none; color: #ccc;">{module["type"]}</a><br>'
+            summary_text = module.get("summary", "")
+            display_text = f" - <i>{summary_text}</i>" if summary_text else ""
+            html += f'<a href="#{module["module_id"]}" style="text-decoration:none; color: #ccc;">{module["type"]}</a>{display_text}<br>'
         self.outline_browser.setHtml(html)
+        QTimer.singleShot(0, self.adjust_outline_height)
 
     def scroll_to_module(self, url: QUrl):
         module_id = url.fragment()
@@ -711,6 +924,7 @@ if __name__ == '__main__':
         QTableWidget { background-color: #3c3c3c; color: #ccc; gridline-color: #555; }
         QGroupBox { color: #ccc; }
         QToolBar { background-color: #3c3c3c; border: none; }
+        QToolButton { color: #fff; }
         /* Table styles for Markdown preview */
         table {
             width: 100%;
