@@ -4,3 +4,4 @@ Markdown
 numpy
 holidays
 requests
+faiss-cpu

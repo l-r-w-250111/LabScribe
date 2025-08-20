@@ -10,20 +10,28 @@ import subprocess
 import matplotlib
 import requests
 from datetime import datetime
+from urllib.parse import unquote
 from PyQt6.QtCore import Qt, QMimeData, QPoint, QUrl, QEvent, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QDrag, QPainter, QPixmap, QKeySequence, QAction
+from collections import defaultdict
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QFrame, QLabel, QListWidget, QListWidgetItem, QTextEdit,
     QScrollArea, QTextBrowser, QPushButton, QLineEdit, QFormLayout, QSizePolicy,
-    QStackedWidget, QFileDialog, QGroupBox, QToolBar
+    QStackedWidget, QFileDialog, QGroupBox, QToolBar, QComboBox, QDialog, QTabWidget,
+    QInputDialog
 )
 
 # Local imports
 from chart_widget import ChartWidget
 from table_widget import TableWidget
 from gantt_chart_widget import GanttChartWidget
+from bar_chart_widget import BarChartWidget
+from pie_chart_widget import PieChartWidget
 from settings import Settings
+from project_view import ProjectView
+from indexing_service import IndexingService
+from search_service import SearchService
 import config
 
 # External imports
@@ -36,6 +44,7 @@ CHART_MODULE_TYPE = "Chart" # Renamed
 TABLE_MODULE_TYPE = "Table"       # New
 MARKDOWN_MODULE_TYPE = "Markdown/Mermaid" # New
 GANTT_CHART_MODULE_TYPE = "Gantt Chart"
+METADATA_MODULE_TYPE = "Experiment Metadata"
 
 # --- Base Draggable Module ---
 class BaseModuleWidget(QFrame):
@@ -277,6 +286,76 @@ class GanttChartModuleWidget(BaseModuleWidget):
         # Pass the raw lines to the widget; it will handle all parsing.
         self.gantt_chart_widget.update_plot(lines)
 
+
+# --- Metadata Module ---
+class MetadataModuleWidget(BaseModuleWidget):
+    project_link_requested = pyqtSignal(str)
+
+    def __init__(self, module_id, module_type, content, window, project_names=None, parent=None):
+        super().__init__(module_id, module_type, window, parent)
+        self.content = content or {}
+        self.project_names = project_names or []
+
+        layout = QFormLayout()
+        
+        self.experiment_name_edit = QLineEdit(self.content.get("experiment_name", ""))
+        
+        # --- Project Row Layout ---
+        project_layout = QHBoxLayout()
+        self.project_combo = QComboBox()
+        self.project_combo.setEditable(True)
+        self.project_combo.addItems(self.project_names)
+        self.project_combo.setCurrentText(self.content.get("project", ""))
+        self.open_project_button = QPushButton("Open")
+        self.open_project_button.setFixedWidth(60) # Set a smaller fixed width
+        self.open_project_button.clicked.connect(self._on_open_project_clicked)
+        project_layout.addWidget(self.project_combo)
+        project_layout.addWidget(self.open_project_button)
+
+        self.status_combo = QComboBox()
+        self.status_combo.addItems(["In Progress", "Success", "Fail"])
+        self.status_combo.setCurrentText(self.content.get("status", "In Progress"))
+        
+        self.date_edit = QLineEdit(self.content.get("date", datetime.now().strftime("%Y-%m-%d")))
+        self.date_edit.setPlaceholderText("YYYY-MM-DD")
+        self.cost_edit = QLineEdit(self.content.get("cost", "0"))
+
+        layout.addRow("Experiment Name:", self.experiment_name_edit)
+        layout.addRow("Project Name:", project_layout)
+        layout.addRow("Status:", self.status_combo)
+        layout.addRow("Date:", self.date_edit)
+        layout.addRow("Cost:", self.cost_edit)
+        
+        self.main_layout.addLayout(layout)
+
+        # Connect signals to update content
+        self.experiment_name_edit.textChanged.connect(self.on_content_changed)
+        self.project_combo.currentTextChanged.connect(self.on_content_changed)
+        self.project_combo.currentTextChanged.connect(self._update_open_button_state)
+        self.status_combo.currentTextChanged.connect(self.on_content_changed)
+        self.date_edit.textChanged.connect(self.on_content_changed)
+        self.cost_edit.textChanged.connect(self.on_content_changed)
+
+        self._update_open_button_state() # Set initial state
+
+    def on_content_changed(self):
+        self.content["experiment_name"] = self.experiment_name_edit.text()
+        self.content["project"] = self.project_combo.currentText()
+        self.content["status"] = self.status_combo.currentText()
+        self.content["date"] = self.date_edit.text()
+        self.content["cost"] = self.cost_edit.text()
+        self.main_window.update_module_content(self.module_id, self.content)
+
+    def _update_open_button_state(self):
+        """Enable the 'Open' button only if the project exists."""
+        current_project = self.project_combo.currentText()
+        self.open_project_button.setEnabled(current_project in self.project_names)
+
+    def _on_open_project_clicked(self):
+        """Emits a signal to request opening the project view."""
+        project_name = self.project_combo.currentText()
+        if project_name in self.project_names:
+            self.project_link_requested.emit(project_name)
 
 # --- Table Module ---
 class TableModuleWidget(BaseModuleWidget):
@@ -534,7 +613,8 @@ class SummaryWorker(QThread):
                     "stream": True
                 }
                 
-                with requests.post(config.OLLAMA_API_URL, json=payload, stream=True) as response:
+                api_url = config.OLLAMA_API_URL.rstrip('/') + "/api/generate"
+                with requests.post(api_url, json=payload, stream=True) as response:
                     response.raise_for_status()
                     
                     full_summary = ""
@@ -556,6 +636,105 @@ class SummaryWorker(QThread):
                 self.summary_ready.emit(module_id, f"Error: {e}")
             
         self.finished.emit()
+
+# --- Indexing Worker ---
+class IndexingWorker(QThread):
+    """
+    A dedicated worker thread to run the indexing process in the background.
+    """
+    finished = pyqtSignal(bool) # Emits success status
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.indexing_service = IndexingService()
+
+    def run(self):
+        """Runs the indexing process."""
+        try:
+            success = self.indexing_service.build_index()
+            self.finished.emit(success)
+        except Exception as e:
+            print(f"An unhandled error occurred during indexing: {e}")
+            self.finished.emit(False)
+
+# --- Search Worker ---
+class SearchWorker(QThread):
+    """
+    A worker thread to run a search query without freezing the UI.
+    """
+    results_ready = pyqtSignal(list)
+
+    def __init__(self, query_text, parent=None):
+        super().__init__(parent)
+        self.query_text = query_text
+        self.search_service = SearchService()
+
+    def run(self):
+        """Runs the search and emits the results."""
+        if self.search_service.is_ready:
+            results = self.search_service.search(self.query_text)
+            self.results_ready.emit(results)
+        else:
+            self.results_ready.emit([]) # Emit empty list if index not ready
+
+# --- Generation Worker ---
+class GenerationWorker(QThread):
+    """
+    A worker to generate an answer from a query and context chunks.
+    """
+    answer_chunk_ready = pyqtSignal(str)
+    generation_finished = pyqtSignal()
+
+    def __init__(self, query, context_chunks, parent=None):
+        super().__init__(parent)
+        self.query = query
+        self.context_chunks = context_chunks
+
+    def _construct_prompt(self):
+        """Builds the prompt for the RAG model."""
+        context_str = "\n---\n".join(self.context_chunks)
+        
+        prompt = (
+            "You are a helpful assistant. Please answer the user's question based "
+            "*only* on the following context provided from their lab notes. "
+            "If the answer is not contained within the context, say 'I could not "
+            "find an answer in the provided notes.'\n\n"
+            "--- CONTEXT ---\n"
+            f"{context_str}\n"
+            "--- END CONTEXT ---\n\n"
+            f"USER'S QUESTION: {self.query}\n\n"
+            "ANSWER:"
+        )
+        return prompt
+
+    def run(self):
+        """Runs the generation process."""
+        prompt = self._construct_prompt()
+        payload = {
+            "model": config.SUMMARY_GENERATOR_MODEL, # Reuse summarization model for generation
+            "prompt": prompt,
+            "stream": True
+        }
+        
+        api_url = config.OLLAMA_API_URL.rstrip('/') + "/api/generate"
+        
+        try:
+            with requests.post(api_url, json=payload, stream=True) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if line:
+                        try:
+                            chunk = json.loads(line)
+                            self.answer_chunk_ready.emit(chunk.get("response", ""))
+                            if chunk.get("done"):
+                                break
+                        except json.JSONDecodeError:
+                            continue
+        except requests.exceptions.RequestException as e:
+            print(f"Error calling Ollama for generation: {e}")
+        finally:
+            self.generation_finished.emit()
+
 
 # --- Main Application ---
 class MainWindow(QMainWindow):
@@ -580,6 +759,461 @@ class MainWindow(QMainWindow):
         self.update_outline()
         self.update_window_title()
         self.summary_worker = None
+        self.indexing_worker = None
+        self.search_worker = None
+        self.generation_worker = None
+        self.last_search_query = None
+        self.last_search_results = None
+
+    def start_search(self):
+        """Starts the background thread to perform a search."""
+        query = self.search_query_input.text()
+        if not query:
+            return
+        
+        self.search_button.setEnabled(False)
+        self.search_button.setText("Searching...")
+        self.search_results_list.clear()
+        self.answer_browser.setVisible(False)
+        self.answer_display_label.setVisible(False)
+        self.generate_answer_button.setEnabled(False)
+        self.open_search_result_button.setEnabled(False)
+
+        self.search_worker = SearchWorker(query)
+        self.search_worker.results_ready.connect(self.display_search_results)
+        self.search_worker.start()
+
+    def display_search_results(self, results):
+        """Populates the QListWidget with search results."""
+        self.search_results_list.clear()
+        self.open_search_result_button.setEnabled(False)
+
+        if not results:
+            self.search_results_list.addItem(QListWidgetItem("No relevant results found."))
+            self.search_button.setEnabled(True)
+            self.search_button.setText("Search")
+            return
+
+        for res in results:
+            title = res.get('source_note_title', 'Untitled Note')
+            path = res.get('source_note_path', '')
+            chunk = res.get('chunk_text', '')
+            
+            # Display title and score, store path and chunk in data/tooltip
+            item_text = f"{title} (Score: {res.get('distance', 0):.2f})"
+            list_item = QListWidgetItem(item_text)
+            list_item.setData(Qt.ItemDataRole.UserRole, path)
+            list_item.setToolTip(f"Context: ...{chunk}...")
+            self.search_results_list.addItem(list_item)
+        
+        self.search_button.setEnabled(True)
+        self.search_button.setText("Search")
+        
+        # Store context for the generation step and enable the button
+        self.last_search_query = self.search_query_input.text()
+        self.last_search_results = results
+        self.generate_answer_button.setEnabled(True)
+        
+        self.search_worker = None
+
+    def _open_selected_search_result(self):
+        """Loads the note from the selected item in the search results list."""
+        selected_items = self.search_results_list.selectedItems()
+        if not selected_items:
+            return
+        
+        note_path = selected_items[0].data(Qt.ItemDataRole.UserRole)
+        if note_path and os.path.exists(note_path):
+            self.load_note(note_path)
+            self.repopulate_modules()
+        else:
+            print(f"Error: Note path not found or invalid: {note_path}")
+
+    def start_answer_generation(self):
+        """Starts the background thread for answer generation."""
+        if not self.last_search_query or not self.last_search_results:
+            return
+
+        self.generate_answer_button.setEnabled(False)
+        self.generate_answer_button.setText("Generating Answer...")
+        self.answer_browser.clear()
+        self.answer_browser.setVisible(True)
+        self.answer_display_label.setVisible(True)
+
+        context_chunks = [res['chunk_text'] for res in self.last_search_results]
+        self.generation_worker = GenerationWorker(self.last_search_query, context_chunks)
+        self.generation_worker.answer_chunk_ready.connect(self.on_answer_chunk_ready)
+        self.generation_worker.generation_finished.connect(self.on_generation_finished)
+        self.generation_worker.start()
+
+    def on_answer_chunk_ready(self, text):
+        """Appends a chunk of the generated answer to the display."""
+        self.answer_browser.insertPlainText(text)
+
+    def on_generation_finished(self):
+        """Called when the generation worker is finished."""
+        self.generate_answer_button.setEnabled(True)
+        self.generate_answer_button.setText("Generate Answer from Results")
+        self.generation_worker = None
+
+
+    def start_indexing_process(self):
+        """Starts the background thread to build the search index."""
+        self.build_index_button.setEnabled(False)
+        self.build_index_button.setText("Indexing...")
+        self.indexing_status_label.setText("Status: Indexing in progress...")
+        
+        self.indexing_worker = IndexingWorker()
+        self.indexing_worker.finished.connect(self.on_indexing_finished)
+        self.indexing_worker.start()
+
+    def on_indexing_finished(self, success):
+        """Called when the indexing worker thread has finished."""
+        self.build_index_button.setEnabled(True)
+        self.build_index_button.setText("Build/Update Search Index")
+        if success:
+            last_indexed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.settings.set('last_indexed', last_indexed)
+            self.indexing_status_label.setText(f"Status: Last indexed on {last_indexed}")
+        else:
+            self.indexing_status_label.setText("Status: Indexing failed. See console for errors.")
+        self.indexing_worker = None # Clean up
+
+    def _open_project_view(self, project_path):
+        """Creates and displays the ProjectView for a given project path."""
+        if os.path.exists(project_path):
+            project_view = ProjectView(project_path, self)
+            project_view.close_requested.connect(self.show_note_view)
+
+            # Remove the old project view if it exists
+            old_view = self.main_view_stack.widget(1)
+            if old_view:
+                self.main_view_stack.removeWidget(old_view)
+                old_view.deleteLater()
+            
+            self.main_view_stack.insertWidget(1, project_view)
+            self.main_view_stack.setCurrentIndex(1)
+        else:
+            print(f"Error: Could not find project file at {project_path}")
+
+    def _open_project_from_link(self, project_name):
+        """Finds a project by name and opens its view."""
+        project_filename = f"{project_name}.project.json"
+        project_path = os.path.join(self.settings.get('save_folder'), project_filename)
+        self._open_project_view(project_path)
+
+    def _get_all_project_names(self):
+        """Scans the save folder and returns a list of all unique project names."""
+        save_folder = self.settings.get('save_folder')
+        project_names = set()
+        if not os.path.isdir(save_folder):
+            return []
+        
+        for filename in os.listdir(save_folder):
+            if filename.endswith(".project.json"):
+                try:
+                    with open(os.path.join(save_folder, filename), 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        if 'project_name' in data:
+                            project_names.add(data['project_name'])
+                except (IOError, json.JSONDecodeError):
+                    continue
+        return sorted(list(project_names))
+
+    def _aggregate_metadata(self):
+        """Scans all notes in the save folder and aggregates metadata, with caching."""
+        save_folder = self.settings.get('save_folder')
+        cache_path = os.path.join(os.path.expanduser("~"), ".labscribe_cache.json")
+        
+        # 1. Check if cache is valid
+        if os.path.exists(cache_path):
+            cache_mtime = os.path.getmtime(cache_path)
+            is_stale = False
+            for filename in os.listdir(save_folder):
+                if filename.endswith(".json"):
+                    file_path = os.path.join(save_folder, filename)
+                    if os.path.getmtime(file_path) > cache_mtime:
+                        is_stale = True
+                        break
+            if not is_stale:
+                print("Loading metadata from cache.")
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+
+        # 2. If cache is stale or doesn't exist, re-aggregate
+        print("Re-aggregating metadata from source files...")
+        all_metadata = []
+        if not os.path.isdir(save_folder):
+            print(f"Warning: Save folder '{save_folder}' does not exist.")
+            return all_metadata
+
+        for filename in os.listdir(save_folder):
+            if filename.endswith(".json"):
+                file_path = os.path.join(save_folder, filename)
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        note_data = json.load(f)
+                        for module in note_data.get("modules", []):
+                            if module.get("type") == METADATA_MODULE_TYPE:
+                                all_metadata.append(module.get("content", {}))
+                except (IOError, json.JSONDecodeError) as e:
+                    print(f"Warning: Could not read or parse {filename}: {e}")
+                    continue
+        
+        # 3. Save new data to cache
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(all_metadata, f)
+            print(f"Metadata cache saved to {cache_path}")
+        except IOError as e:
+            print(f"Warning: Could not write to cache file {cache_path}: {e}")
+
+        return all_metadata
+
+    def show_dashboard(self):
+        """Shows the KPI dashboard window with a tabbed interface."""
+        raw_data = self._aggregate_metadata()
+        
+        # Pre-parse dates and filter out invalid entries
+        aggregated_data = []
+        for item in raw_data:
+            try:
+                # Add a new key 'parsed_date' to each item
+                item['parsed_date'] = datetime.strptime(item.get("date", ""), '%Y-%m-%d')
+                aggregated_data.append(item)
+            except (ValueError, TypeError):
+                # Skip items with invalid or missing date format
+                continue
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("KPI Dashboard")
+        main_layout = QVBoxLayout(dialog)
+        dialog.resize(1000, 700) # Increased height for tabs
+
+        if not aggregated_data:
+            label = QLabel("No metadata found in any notes.")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            main_layout.addWidget(label)
+            dialog.exec()
+            return
+
+        # --- Create Main Tab Widget ---
+        main_tabs = QTabWidget()
+        main_layout.addWidget(main_tabs)
+
+        # --- Tab 1: Experiments Per Month ---
+        exp_per_month_widget = QWidget()
+        exp_per_month_layout = QVBoxLayout(exp_per_month_widget)
+
+        experiments_per_month = defaultdict(int)
+        for item in aggregated_data:
+            month_key = item['parsed_date'].strftime("%Y-%m")
+            experiments_per_month[month_key] += 1
+
+        if experiments_per_month:
+            sorted_months = sorted(experiments_per_month.keys())
+            bar_labels = sorted_months
+            bar_values = [experiments_per_month[key] for key in sorted_months]
+            exp_per_month_chart = BarChartWidget()
+            exp_per_month_chart.update_plot(
+                x_labels=bar_labels, y_values=bar_values,
+                title="Experiments per Month"
+            )
+            exp_per_month_layout.addWidget(exp_per_month_chart)
+        else:
+            exp_per_month_layout.addWidget(QLabel("No data for 'Experiments per Month' chart."))
+        
+        main_tabs.addTab(exp_per_month_widget, "Experiments per Month")
+
+        # --- Tab 2: Experiment Status ---
+        status_widget = QWidget()
+        status_layout = QVBoxLayout(status_widget)
+        status_tabs = QTabWidget() # Nested tabs
+        status_layout.addWidget(status_tabs)
+
+        # Helper function to create a pie chart
+        def create_status_pie_chart(data, title):
+            if not data:
+                # Return a widget with a message for the "no data" case
+                msg_widget = QWidget()
+                msg_layout = QVBoxLayout(msg_widget)
+                label = QLabel(f"No data for '{title}'")
+                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                msg_layout.addWidget(label)
+                return msg_widget
+
+            status_counts = defaultdict(int)
+            for item in data:
+                status = item.get("status", "Unknown")
+                status_counts[status] += 1
+            
+            pie_labels = list(status_counts.keys())
+            pie_values = list(status_counts.values())
+            chart = PieChartWidget()
+            chart.update_plot(
+                labels=pie_labels, values=pie_values,
+                title=title
+            )
+            return chart
+
+        # Filter data for each time period
+        now = datetime.now()
+        
+        # This Month
+        monthly_data = [
+            item for item in aggregated_data 
+            if item['parsed_date'].year == now.year and item['parsed_date'].month == now.month
+        ]
+        month_chart = create_status_pie_chart(monthly_data, "Status (This Month)")
+        status_tabs.addTab(month_chart, "This Month")
+
+        # This Quarter
+        current_quarter = (now.month - 1) // 3 + 1
+        quarterly_data = [
+            item for item in aggregated_data 
+            if item['parsed_date'].year == now.year and \
+               (item['parsed_date'].month - 1) // 3 + 1 == current_quarter
+        ]
+        quarter_chart = create_status_pie_chart(quarterly_data, "Status (This Quarter)")
+        status_tabs.addTab(quarter_chart, "This Quarter")
+
+        # This Year
+        yearly_data = [
+            item for item in aggregated_data 
+            if item['parsed_date'].year == now.year
+        ]
+        year_chart = create_status_pie_chart(yearly_data, "Status (This Year)")
+        status_tabs.addTab(year_chart, "This Year")
+        
+        # All Time
+        all_time_chart = create_status_pie_chart(aggregated_data, "Status (All Time)")
+        status_tabs.addTab(all_time_chart, "All Time")
+
+        main_tabs.addTab(status_widget, "Experiment Status")
+
+        # --- Tab 3: Cost by Project (Monthly Stacked) ---
+        cost_widget = QWidget()
+        cost_layout = QVBoxLayout(cost_widget)
+        
+        # New data structure: { 'YYYY-MM': { 'ProjectA': cost, 'ProjectB': cost } }
+        costs_by_month_project = defaultdict(lambda: defaultdict(float))
+        for item in aggregated_data:
+            project_name = item.get("project") or "Unknown Project"
+            month_key = item['parsed_date'].strftime("%Y-%m")
+            try:
+                cost = float(item.get("cost", "0"))
+                if cost > 0:
+                    costs_by_month_project[month_key][project_name] += cost
+            except (ValueError, TypeError):
+                continue
+
+        if costs_by_month_project:
+            cost_chart = BarChartWidget()
+            # Pass the new, complex data structure to the chart widget
+            cost_chart.update_plot_stacked(
+                data=costs_by_month_project,
+                title="Monthly Cost by Project"
+            )
+            cost_layout.addWidget(cost_chart)
+        else:
+            cost_layout.addWidget(QLabel("No cost data available."))
+
+        main_tabs.addTab(cost_widget, "Cost by Project (Monthly)")
+
+
+        dialog.exec()
+
+    def show_project_browser(self):
+        """Shows the Project Browser dialog to open or create projects."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Project Browser")
+        dialog.setMinimumSize(400, 300)
+
+        layout = QVBoxLayout(dialog)
+        
+        # --- Project List ---
+        list_label = QLabel("Projects:")
+        layout.addWidget(list_label)
+        
+        project_list_widget = QListWidget()
+        layout.addWidget(project_list_widget)
+
+        # --- Buttons ---
+        button_layout = QHBoxLayout()
+        new_project_button = QPushButton("New Project...")
+        open_project_button = QPushButton("Open Project")
+        open_project_button.setEnabled(False) # Disabled until an item is selected
+        
+        button_layout.addStretch()
+        button_layout.addWidget(new_project_button)
+        button_layout.addWidget(open_project_button)
+        layout.addLayout(button_layout)
+
+        # --- Functions ---
+        def refresh_project_list():
+            """Scans for .project.json files and populates the list."""
+            project_list_widget.clear()
+            save_folder = self.settings.get('save_folder')
+            if not os.path.isdir(save_folder):
+                return
+            for filename in os.listdir(save_folder):
+                if filename.endswith(".project.json"):
+                    # Add the project name, not the full filename
+                    project_name = filename.replace(".project.json", "")
+                    project_list_widget.addItem(project_name)
+
+        def create_new_project():
+            """Opens a dialog to get a new project name and creates the file."""
+            project_name, ok = QInputDialog.getText(dialog, "New Project", "Enter project name:")
+            if ok and project_name:
+                # Sanitize project name to be a valid filename
+                filename = f"{project_name}.project.json"
+                file_path = os.path.join(self.settings.get('save_folder'), filename)
+
+                if os.path.exists(file_path):
+                    # In a real app, you'd show an error message here
+                    print(f"Error: Project '{project_name}' already exists.")
+                    return
+
+                new_project_data = {
+                    "project_id": str(uuid.uuid4()),
+                    "project_name": project_name,
+                    "created_at": datetime.now().isoformat(),
+                    "master_gantt_data": f"Initial Task, {datetime.now().strftime('%Y-%m-%d')}, {datetime.now().strftime('%Y-%m-%d')}"
+                }
+                
+                try:
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        json.dump(new_project_data, f, indent=4, ensure_ascii=False)
+                    print(f"Project '{project_name}' created at {file_path}")
+                    refresh_project_list()
+                except IOError as e:
+                    print(f"Error creating project file: {e}")
+
+        def open_project():
+            """Opens the selected project in the ProjectView."""
+            selected_items = project_list_widget.selectedItems()
+            if not selected_items:
+                return
+            
+            project_name = selected_items[0].text()
+            project_filename = f"{project_name}.project.json"
+            project_path = os.path.join(self.settings.get('save_folder'), project_filename)
+            self._open_project_view(project_path)
+            dialog.accept() # Close the browser dialog
+
+
+        # --- Connections ---
+        new_project_button.clicked.connect(create_new_project)
+        project_list_widget.itemSelectionChanged.connect(lambda: open_project_button.setEnabled(bool(project_list_widget.selectedItems())))
+        project_list_widget.itemDoubleClicked.connect(open_project)
+        open_project_button.clicked.connect(open_project)
+
+
+        # Initial population
+        refresh_project_list()
+        
+        dialog.exec()
 
     def setup_left_frame(self):
         self.left_frame = QFrame()
@@ -603,7 +1237,7 @@ class MainWindow(QMainWindow):
         modules_layout = QVBoxLayout(self.modules_group)
         self.module_list_widget = DraggableModuleList()
         self.module_list_widget.setDragEnabled(True)
-        self.available_modules = ["Purpose", "Conditions", "Results", "Conclusion", "Discussion", CHART_MODULE_TYPE, TABLE_MODULE_TYPE, GANTT_CHART_MODULE_TYPE, MARKDOWN_MODULE_TYPE]
+        self.available_modules = ["Purpose", "Conditions", "Results", "Conclusion", "Discussion", CHART_MODULE_TYPE, TABLE_MODULE_TYPE, GANTT_CHART_MODULE_TYPE, MARKDOWN_MODULE_TYPE, METADATA_MODULE_TYPE]
         self.module_list_widget.addItems(self.available_modules)
         modules_layout.addWidget(self.module_list_widget)
         self.left_layout.addWidget(self.modules_group)
@@ -632,7 +1266,66 @@ class MainWindow(QMainWindow):
         save_folder_layout.addWidget(browse_button)
         settings_layout.addRow("Save Folder:", save_folder_layout)
 
+        # --- AI Search Indexing ---
+        settings_layout.addRow(QLabel("<b>AI Search Index</b>"))
+        self.build_index_button = QPushButton("Build/Update Search Index")
+        self.build_index_button.clicked.connect(self.start_indexing_process)
+        settings_layout.addRow(self.build_index_button)
+        
+        last_indexed_time = self.settings.get('last_indexed') or "Never"
+        self.indexing_status_label = QLabel(f"Status: Last indexed on {last_indexed_time}")
+        settings_layout.addRow(self.indexing_status_label)
+
+
         parent_layout.addWidget(self.settings_group)
+
+        # --- AI Search ---
+        self.search_group = QGroupBox("AI Search")
+        search_layout = QVBoxLayout(self.search_group)
+        
+        self.search_query_input = QLineEdit()
+        self.search_query_input.setPlaceholderText("Enter your question...")
+        self.search_query_input.returnPressed.connect(self.start_search) # Allow pressing Enter
+        search_layout.addWidget(self.search_query_input)
+        
+        self.search_button = QPushButton("Search")
+        self.search_button.clicked.connect(self.start_search)
+        search_layout.addWidget(self.search_button)
+
+        # --- Answer Display ---
+        self.answer_display_label = QLabel("<b>AI Generated Answer:</b>")
+        search_layout.addWidget(self.answer_display_label)
+        self.answer_browser = QTextBrowser()
+        self.answer_browser.setMinimumHeight(150)
+        self.answer_browser.setVisible(False) # Initially hidden
+        self.answer_display_label.setVisible(False)
+        search_layout.addWidget(self.answer_browser)
+
+        # --- Generate Answer Button ---
+        self.generate_answer_button = QPushButton("Generate Answer from Results")
+        self.generate_answer_button.setEnabled(False)
+        self.generate_answer_button.clicked.connect(self.start_answer_generation)
+        search_layout.addWidget(self.generate_answer_button)
+
+        # --- Search Results ---
+        self.results_display_label = QLabel("<b>Retrieved Notes (Sources):</b>")
+        search_layout.addWidget(self.results_display_label)
+        
+        self.search_results_list = QListWidget()
+        self.search_results_list.setMinimumHeight(200)
+        self.search_results_list.itemSelectionChanged.connect(
+            lambda: self.open_search_result_button.setEnabled(True)
+        )
+        self.search_results_list.itemDoubleClicked.connect(self._open_selected_search_result)
+        search_layout.addWidget(self.search_results_list)
+
+        self.open_search_result_button = QPushButton("Open Selected Note")
+        self.open_search_result_button.setEnabled(False)
+        self.open_search_result_button.clicked.connect(self._open_selected_search_result)
+        search_layout.addWidget(self.open_search_result_button)
+
+        parent_layout.addWidget(self.search_group)
+
 
     def update_username(self, new_username):
         self.settings.set('username', new_username)
@@ -670,9 +1363,18 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.open_note)
         save_action = QAction("Save", self)
         save_action.triggered.connect(self.save_note)
+        dashboard_action = QAction("Dashboard", self)
+        dashboard_action.triggered.connect(self.show_dashboard)
         toolbar.addAction(new_action)
         toolbar.addAction(open_action)
         toolbar.addAction(save_action)
+        toolbar.addSeparator()
+        projects_action = QAction("Projects", self)
+        projects_action.triggered.connect(self.show_project_browser)
+        toolbar.addAction(projects_action)
+        dashboard_action = QAction("Dashboard", self)
+        dashboard_action.triggered.connect(self.show_dashboard)
+        toolbar.addAction(dashboard_action)
         right_layout.addWidget(toolbar)
 
         # --- Outline ---
@@ -694,14 +1396,26 @@ class MainWindow(QMainWindow):
         outline_layout.addWidget(self.outline_browser)
         right_layout.addWidget(self.outline_group)
 
-        # --- Editor Area ---
+        # --- Main View Stack ---
+        self.main_view_stack = QStackedWidget()
+        
+        # View 0: Note Editor
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.editor_area = EditorArea(self)
         self.scroll_area.setWidget(self.editor_area)
-        
-        right_layout.addWidget(self.scroll_area)
+        self.main_view_stack.addWidget(self.scroll_area)
+
+        # View 1: Project View (placeholder)
+        self.project_view_container = QWidget()
+        self.main_view_stack.addWidget(self.project_view_container)
+
+        right_layout.addWidget(self.main_view_stack)
         self.main_layout.addWidget(right_widget, 1)
+
+    def show_note_view(self):
+        """Switches the main view to the note editor."""
+        self.main_view_stack.setCurrentIndex(0)
 
     def get_drop_index(self, position: QPoint):
         for i in range(self.editor_area.editor_layout.count() - 1):
@@ -721,6 +1435,11 @@ class MainWindow(QMainWindow):
         elif module_type == GANTT_CHART_MODULE_TYPE:
             gantt_content = content if isinstance(content, dict) else {}
             widget = GanttChartModuleWidget(module_id, module_type, gantt_content, self)
+        elif module_type == METADATA_MODULE_TYPE:
+            metadata_content = content if isinstance(content, dict) else {}
+            project_names = self._get_all_project_names()
+            widget = MetadataModuleWidget(module_id, module_type, metadata_content, self, project_names=project_names)
+            widget.project_link_requested.connect(self._open_project_from_link)
         elif module_type == TABLE_MODULE_TYPE:
             table_content = content if isinstance(content, list) else [["" for _ in range(4)] for _ in range(4)]
             widget = TableModuleWidget(module_id, module_type, table_content, self)
@@ -738,6 +1457,11 @@ class MainWindow(QMainWindow):
                 content = {"x_data": [], "y_series": [], "height": 300}
             elif module_type == GANTT_CHART_MODULE_TYPE:
                 content = {"data": "Task A,2024-01-01,2024-01-05\nTask B,2024-01-03,2024-01-08", "height": 300}
+            elif module_type == METADATA_MODULE_TYPE:
+                content = {
+                    "project": "", "status": "In Progress", 
+                    "date": datetime.now().strftime("%Y-%m-%d"), "cost": "0"
+                }
             elif module_type == TABLE_MODULE_TYPE:
                 content = self.module_widgets[module_id].table_widget.get_data()
             else: # For text modules
@@ -842,6 +1566,7 @@ class MainWindow(QMainWindow):
         self.clear_editor()
         for module_data in self.note_data.get("modules", []):
             self.add_module_widget(module_data["type"], module_data.get("content"), module_data["module_id"])
+        self.show_note_view()
 
     def new_note(self):
         self.current_note_path = None
