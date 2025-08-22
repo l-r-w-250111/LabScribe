@@ -76,6 +76,8 @@ This application relies on a local Ollama instance to function.
     *   In the "Settings" panel on the left, click the **"Build/Update Search Index"** button.
     *   This process will read all your notes and create a searchable index. It may take some time. You must run this once before you can use the AI Search. Re-run it whenever you have added or significantly changed your notes.
 
+> **Note:** The search index files (`.labscribe_index.faiss` and `.labscribe_index_meta.json`) are stored in your user home directory. As they start with a dot, they may be hidden on macOS and Linux.
+
 ## ✍️ Usage    
 *   **Adding Modules:** Drag a module from the "Available Modules" list into the central editor.
 *   **Project Management:**
