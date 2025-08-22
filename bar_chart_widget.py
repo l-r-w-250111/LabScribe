@@ -58,13 +58,14 @@ class BarChartWidget(QWidget):
             bars = self.axes.bar(x_categories, values, label=segment, bottom=[bottoms[x_cat] for x_cat in x_categories], color=color_map[segment])
             
             # Add text labels inside the bars
+            y_axis_max = self.axes.get_ylim()[1]
             for i, bar in enumerate(bars):
                 height = bar.get_height()
                 if height > 0: # Only label bars with a value
                     y_center = bar.get_y() + height / 2
                     # A simple threshold to avoid tiny labels
                     # Check if height is more than 5% of the total axis height
-                    if height / self.axes.get_ylim()[1] > 0.05:
+                    if y_axis_max > 0 and (height / y_axis_max) > 0.05:
                          self.axes.text(bar.get_x() + bar.get_width() / 2.0, y_center,
                                        segment, ha='center', va='center', color='white', fontsize=8)
 

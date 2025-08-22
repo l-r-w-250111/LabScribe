@@ -685,23 +685,30 @@ class GenerationWorker(QThread):
     answer_chunk_ready = pyqtSignal(str)
     generation_finished = pyqtSignal()
 
-    def __init__(self, query, context_chunks, parent=None):
+    def __init__(self, query, search_results, parent=None):
         super().__init__(parent)
         self.query = query
-        self.context_chunks = context_chunks
+        self.search_results = search_results
 
     def _construct_prompt(self):
-        """Builds the prompt for the RAG model."""
-        context_str = "\n---\n".join(self.context_chunks)
+        """Builds the prompt for the RAG model, including sources for citation."""
+        context_blocks = []
+        for res in self.search_results:
+            title = res.get('source_note_title', 'Untitled Note')
+            chunk = res.get('chunk_text', '')
+            context_blocks.append(f"--- CONTEXT FROM NOTE: {title} ---\n{chunk}")
+        
+        context_str = "\n\n".join(context_blocks)
         
         prompt = (
             "You are a helpful assistant. Please answer the user's question based "
             "*only* on the following context provided from their lab notes. "
+            "When you use information from a specific note, you **must** cite the source "
+            "using the format `[Source: Note Title]`. "
             "If the answer is not contained within the context, say 'I could not "
             "find an answer in the provided notes.'\n\n"
-            "--- CONTEXT ---\n"
-            f"{context_str}\n"
-            "--- END CONTEXT ---\n\n"
+            f"{context_str}\n\n"
+            f"--- END CONTEXT ---\n\n"
             f"USER'S QUESTION: {self.query}\n\n"
             "ANSWER:"
         )
@@ -840,8 +847,8 @@ class MainWindow(QMainWindow):
         self.answer_browser.setVisible(True)
         self.answer_display_label.setVisible(True)
 
-        context_chunks = [res['chunk_text'] for res in self.last_search_results]
-        self.generation_worker = GenerationWorker(self.last_search_query, context_chunks)
+        # Pass the full search results to the worker, not just the text
+        self.generation_worker = GenerationWorker(self.last_search_query, self.last_search_results)
         self.generation_worker.answer_chunk_ready.connect(self.on_answer_chunk_ready)
         self.generation_worker.generation_finished.connect(self.on_generation_finished)
         self.generation_worker.start()
@@ -1120,6 +1127,34 @@ class MainWindow(QMainWindow):
 
         main_tabs.addTab(cost_widget, "Cost by Project (Monthly)")
 
+        # --- Tab 4: Cost Breakdown by Project ---
+        cost_breakdown_widget = QWidget()
+        cost_breakdown_layout = QVBoxLayout(cost_breakdown_widget)
+
+        costs_by_project_exp = defaultdict(lambda: defaultdict(float))
+        for item in aggregated_data:
+            project_name = item.get("project") or "Unknown Project"
+            exp_name = item.get("experiment_name") or "Unnamed Experiment"
+            try:
+                cost = float(item.get("cost", "0"))
+                if cost > 0:
+                    # To avoid overly long labels, we might want to use a unique ID if available
+                    # For now, we combine project and experiment name for uniqueness
+                    costs_by_project_exp[project_name][exp_name] += cost
+            except (ValueError, TypeError):
+                continue
+        
+        if costs_by_project_exp:
+            breakdown_chart = BarChartWidget()
+            breakdown_chart.update_plot_stacked(
+                data=costs_by_project_exp,
+                title="Cost Breakdown by Project"
+            )
+            cost_breakdown_layout.addWidget(breakdown_chart)
+        else:
+            cost_breakdown_layout.addWidget(QLabel("No cost data for breakdown view."))
+        
+        main_tabs.addTab(cost_breakdown_widget, "Cost Breakdown by Project")
 
         dialog.exec()
 
