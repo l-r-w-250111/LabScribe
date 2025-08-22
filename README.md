@@ -2,6 +2,8 @@
 
 > An AI-native electronic lab notebook (ELN) designed to maximize R&D efficiency with integrated project management and intelligent search.
 
+![LabScribe Screenshot](assets/screenshot_1.png)
+
 ## Overview 📖  
 
 `LabScribe` is a modern electronic lab notebook (ELN) that is evolving into a Laboratory Information Management System (LIMS). It provides core ELN functionality for recording daily experiments and integrates powerful, locally-run AI features to enhance your workflow.
