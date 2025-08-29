@@ -887,6 +887,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         self.main_layout = QHBoxLayout(central_widget)
 
+        self.setup_status_bar()
         self.setup_left_frame()
         self.setup_right_frame()
         self.repopulate_modules()
@@ -899,6 +900,22 @@ class MainWindow(QMainWindow):
         self.suggestion_worker = None
         self.last_search_query = None
         self.last_search_results = None
+
+    def setup_status_bar(self):
+        """Sets up the widgets for the status bar."""
+        self.status_indicator_widget = QWidget()
+        status_layout = QHBoxLayout(self.status_indicator_widget)
+        status_layout.setContentsMargins(5, 0, 5, 0)
+
+        self.signal_label = QLabel()
+        self.signal_label.setFixedSize(12, 12)
+
+        self.finalization_status_label = QLabel("Status: Not Finalized")
+
+        status_layout.addWidget(self.signal_label)
+        status_layout.addWidget(self.finalization_status_label)
+
+        self.statusBar().addPermanentWidget(self.status_indicator_widget)
 
     def start_search(self):
         """Starts the background thread to perform a search."""
@@ -1629,13 +1646,6 @@ class MainWindow(QMainWindow):
 
         right_layout.addWidget(toolbar)
 
-        # --- Finalization Status ---
-        self.finalization_status_label = QLabel("")
-        self.finalization_status_label.setStyleSheet("color: #aaffaa; font-weight: bold;")
-        self.finalization_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.finalization_status_label.setVisible(False) # Initially hidden
-        right_layout.addWidget(self.finalization_status_label)
-
         # --- Outline ---
         # Create a header for the outline panel
         outline_header_layout = QHBoxLayout()
@@ -1850,13 +1860,10 @@ class MainWindow(QMainWindow):
             self.add_module_widget(module_data["type"], module_data.get("content"), module_data["module_id"])
         self.show_note_view()
 
-        # After repopulating, check if the note is finalized and update UI
-        if 'finalized_timestamp' in self.note_data:
-            self.set_read_only(True)
-            self.verify_note_integrity()
-        else:
-            self.set_read_only(False)
-            self.finalization_status_label.setVisible(False)
+        # After repopulating, always update the UI state
+        is_finalized = 'finalized_timestamp' in self.note_data
+        self.set_read_only(is_finalized)
+        self.verify_note_integrity()
 
 
     def new_note(self):
@@ -1864,9 +1871,9 @@ class MainWindow(QMainWindow):
         self.load_note(file_path=None)
         self.repopulate_modules()
         self.update_window_title()
-        # Ensure new notes are editable
+        # Ensure new notes are editable and status is updated
         self.set_read_only(False)
-        self.finalization_status_label.setVisible(False)
+        self.verify_note_integrity()
 
     def open_note(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Note", self.settings.get('save_folder'), "JSON Files (*.json)")
@@ -1936,9 +1943,11 @@ class MainWindow(QMainWindow):
         print(f"Note finalized with hash: {sha256_hash}")
 
     def verify_note_integrity(self):
-        """Verifies the integrity of a finalized note and updates the UI label."""
+        """Verifies the integrity of a finalized note and updates the status bar."""
         if 'finalized_timestamp' not in self.note_data:
-            self.finalization_status_label.setVisible(False)
+            self.signal_label.setStyleSheet("background-color: #888; border-radius: 6px;")
+            self.finalization_status_label.setText("Status: Not Finalized")
+            self.finalization_status_label.setStyleSheet("color: #ccc;")
             return
 
         stored_hash = self.note_data.get('content_hash')
@@ -1960,19 +1969,20 @@ class MainWindow(QMainWindow):
             serialized_data = json.dumps(data_to_hash, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
             current_hash = hashlib.sha256(serialized_data).hexdigest()
         except Exception as e:
-            self.finalization_status_label.setText(f"状態: ファイナライズ済み | 検証: エラー | タイムスタンプ: {display_timestamp}")
-            self.finalization_status_label.setStyleSheet("color: #ffaa00;") # Orange for warning
-            self.finalization_status_label.setVisible(True)
+            self.signal_label.setStyleSheet("background-color: #ffaa00; border-radius: 6px;") # Orange
+            self.finalization_status_label.setText(f"Status: Verification Error | Finalized: {display_timestamp}")
+            self.finalization_status_label.setStyleSheet("color: #ffaa00;")
             print(f"Error during verification serialization: {e}")
             return
 
-        self.finalization_status_label.setVisible(True)
         if current_hash == stored_hash:
-            self.finalization_status_label.setText(f"状態: ファイナライズ済み | 検証: 成功 | タイムスタンプ: {display_timestamp}")
-            self.finalization_status_label.setStyleSheet("color: #aaffaa;") # Green for success
+            self.signal_label.setStyleSheet("background-color: #aaffaa; border-radius: 6px;") # Green
+            self.finalization_status_label.setText(f"Status: Verified | Finalized: {display_timestamp}")
+            self.finalization_status_label.setStyleSheet("color: #aaffaa;")
         else:
-            self.finalization_status_label.setText(f"状態: ファイナライズ済み | 検証: 失敗 (コンテンツの不一致) | タイムスタンプ: {display_timestamp}")
-            self.finalization_status_label.setStyleSheet("color: #ff5555;") # Red for failure
+            self.signal_label.setStyleSheet("background-color: #ff5555; border-radius: 6px;") # Red
+            self.finalization_status_label.setText(f"Status: Verification FAILED | Finalized: {display_timestamp}")
+            self.finalization_status_label.setStyleSheet("color: #ff5555;")
 
     def set_read_only(self, read_only):
         """Sets the entire note UI to be read-only or editable."""
