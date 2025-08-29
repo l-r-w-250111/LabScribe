@@ -18,6 +18,7 @@ The application includes **AI-powered summarization**, a full **Project Manageme
     *   Each project has a master Gantt chart for high-level planning.
     *   Notes can be linked to projects as "tickets."
     *   Navigate seamlessly from projects to notes and back.
+*   **Sample Management:** Create, edit, and delete samples to track their properties. Generate a unique QR code for each sample ID for easy labeling and tracking.
 *   **AI-Powered Summarization:** Automatically generate summaries for each module in your notes with the click of a button.
 *   **AI-Powered Search (RAG):**
     *   Build a searchable, semantic index of all your notes.
@@ -88,6 +89,10 @@ This application relies on a local Ollama instance to function.
     *   Type your question into the "AI Search" panel and click "Search."
     *   The most relevant notes will appear in the "Retrieved Notes" list. Select a result and click "Open Selected Note" to view it.
     *   After results are retrieved, click "Generate Answer from Results" to get a synthesized answer from the AI.
+*   **Sample Management:**
+    *   Click the "Samples" button in the main toolbar to open the Sample Management view.
+    *   Use the "New Sample", "Edit Selected", and "Delete Selected" buttons to manage your samples.
+    *   Select a sample and click "Show QR Code" to view a QR code of the sample's ID.
 
 ## 🗺️ Roadmap  
 

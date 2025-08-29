@@ -5,3 +5,4 @@ numpy
 holidays
 requests
 faiss-cpu
+qrcode[pil]

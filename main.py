@@ -30,6 +30,7 @@ from bar_chart_widget import BarChartWidget
 from pie_chart_widget import PieChartWidget
 from settings import Settings
 from project_view import ProjectView
+from sample_view import SampleView
 from indexing_service import IndexingService
 from search_service import SearchService
 import config
@@ -1616,6 +1617,12 @@ class MainWindow(QMainWindow):
         dashboard_action = QAction("Dashboard", self)
         dashboard_action.triggered.connect(self.show_dashboard)
         toolbar.addAction(dashboard_action)
+
+        toolbar.addSeparator()
+        samples_action = QAction("Samples", self)
+        samples_action.triggered.connect(self.show_sample_view)
+        toolbar.addAction(samples_action)
+
         right_layout.addWidget(toolbar)
 
         # --- Outline ---
@@ -1655,12 +1662,30 @@ class MainWindow(QMainWindow):
         self.project_view_container = QWidget()
         self.main_view_stack.addWidget(self.project_view_container)
 
+        # View 2: Sample View (placeholder)
+        self.sample_view_container = QWidget()
+        self.main_view_stack.addWidget(self.sample_view_container)
+
         right_layout.addWidget(self.main_view_stack)
         self.main_layout.addWidget(right_widget, 1)
 
     def show_note_view(self):
         """Switches the main view to the note editor."""
         self.main_view_stack.setCurrentIndex(0)
+
+    def show_sample_view(self):
+        """Creates and displays the SampleView."""
+        sample_view = SampleView(self)
+        sample_view.close_requested.connect(self.show_note_view)
+
+        # Remove the old view at index 2
+        old_view = self.main_view_stack.widget(2)
+        if old_view:
+            self.main_view_stack.removeWidget(old_view)
+            old_view.deleteLater()
+
+        self.main_view_stack.insertWidget(2, sample_view)
+        self.main_view_stack.setCurrentIndex(2)
 
     def get_drop_index(self, position: QPoint):
         for i in range(self.editor_area.editor_layout.count() - 1):
