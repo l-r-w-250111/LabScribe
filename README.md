@@ -18,6 +18,7 @@ The application includes **AI-powered summarization**, a full **Project Manageme
     *   Each project has a master Gantt chart for high-level planning.
     *   Notes can be linked to projects as "tickets."
     *   Navigate seamlessly from projects to notes and back.
+*   **Sample Management:** Create, edit, and delete samples to track their properties. Generate a unique QR code for each sample ID for easy labeling and tracking.
 *   **AI-Powered Summarization:** Automatically generate summaries for each module in your notes with the click of a button.
 *   **AI-Powered Search (RAG):**
     *   Build a searchable, semantic index of all your notes.
@@ -40,15 +41,15 @@ The application includes **AI-powered summarization**, a full **Project Manageme
     npm install -g @mermaid-js/mermaid-cli
     ```
 
-### 2. Installation & Setup 
+### 2. Installation & Setup
 
-1.  **Clone the repository:**  
+1.  **Clone the repository:**
     ```sh
     git clone https://github.com/your-username/LabScribe.git
     cd LabScribe
     ```  
 
-2.  **Install Python dependencies:**  
+2.  **Install Python dependencies:**
     ```sh
     pip install -r requirements.txt
     ```  
@@ -62,7 +63,7 @@ This application relies on a local Ollama instance to function.
 2.  **Pull the required models:** Open your terminal and run the following commands to download the models used by the application:
     ```sh
     # For summarization and answer generation
-    ollama pull gemma3:12b 
+    ollama pull gemma3:12b
 
     # For creating embeddings for the search index
     ollama pull granite-embedding:278m
@@ -78,7 +79,7 @@ This application relies on a local Ollama instance to function.
 
 > **Note:** The search index files (`.labscribe_index.faiss` and `.labscribe_index_meta.json`) are stored in your user home directory. As they start with a dot, they may be hidden on macOS and Linux.
 
-## ✍️ Usage    
+## ✍️ Usage
 *   **Adding Modules:** Drag a module from the "Available Modules" list into the central editor.
 *   **Project Management:**
     *   Click the "Projects" button in the toolbar to open the Project Browser.
@@ -88,6 +89,10 @@ This application relies on a local Ollama instance to function.
     *   Type your question into the "AI Search" panel and click "Search."
     *   The most relevant notes will appear in the "Retrieved Notes" list. Select a result and click "Open Selected Note" to view it.
     *   After results are retrieved, click "Generate Answer from Results" to get a synthesized answer from the AI.
+*   **Sample Management:**
+    *   Click the "Samples" button in the main toolbar to open the Sample Management view.
+    *   Use the "New Sample", "Edit Selected", and "Delete Selected" buttons to manage your samples.
+    *   Select a sample and click "Show QR Code" to view a QR code of the sample's ID.
 
 ## 🗺️ Roadmap  
 
