@@ -1861,7 +1861,10 @@ class MainWindow(QMainWindow):
         self.show_note_view()
 
         # After repopulating, always update the UI state
-        is_finalized = 'finalized_timestamp' in self.note_data
+        is_finalized = False
+        if self.current_note_path:
+            is_finalized = os.path.exists(f"{self.current_note_path}.sig")
+
         self.set_read_only(is_finalized)
         self.verify_note_integrity()
 
@@ -1900,10 +1903,18 @@ class MainWindow(QMainWindow):
         self.current_note_path = file_path
         self.update_window_title()
         print(f"Note saved to {file_path}")
+        return file_path
 
     def finalize_note(self):
-        """Finalizes the note by hashing its content and adding a timestamp."""
-        if 'finalized_timestamp' in self.note_data:
+        """Finalizes the note by creating a separate signature file."""
+        # First, ensure the note is saved and we have a valid path.
+        note_path = self.save_note()
+        if not note_path:
+            QMessageBox.warning(self, "Save Required", "Please save the note before finalizing.")
+            return
+
+        sig_path = f"{note_path}.sig"
+        if os.path.exists(sig_path):
             QMessageBox.information(self, "Already Finalized", "This note has already been finalized.")
             return
 
@@ -1915,58 +1926,66 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.No:
             return
 
-        # Prepare data for hashing (exclude finalization keys)
-        data_to_hash = self.note_data.copy()
-        data_to_hash.pop('finalized_timestamp', None)
-        data_to_hash.pop('content_hash', None)
-
-        # Serialize to a canonical JSON string
+        # self.note_data should be clean, as it's just been saved.
+        # We hash the data that was just written to the file.
         try:
-            serialized_data = json.dumps(data_to_hash, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
+            serialized_data = json.dumps(self.note_data, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
+            content_hash = hashlib.sha256(serialized_data).hexdigest()
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to serialize note data: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to serialize note data for hashing: {e}")
             return
 
-        # Create hash
-        sha256_hash = hashlib.sha256(serialized_data).hexdigest()
+        # Create signature file
+        signature_data = {
+            'finalized_timestamp': datetime.now().isoformat(),
+            'content_hash': content_hash
+        }
 
-        # Add finalization data to the note
-        self.note_data['finalized_timestamp'] = datetime.now().isoformat()
-        self.note_data['content_hash'] = sha256_hash
-
-        # Save the finalized note
-        self.save_note()
+        try:
+            with open(sig_path, "w", encoding="utf-8") as f:
+                json.dump(signature_data, f, indent=4)
+            print(f"Signature file created at {sig_path} with hash {content_hash}")
+        except IOError as e:
+            QMessageBox.critical(self, "Error", f"Failed to write signature file: {e}")
+            return
 
         # Update UI
         self.set_read_only(True)
         self.verify_note_integrity()
-        print(f"Note finalized with hash: {sha256_hash}")
 
     def verify_note_integrity(self):
-        """Verifies the integrity of a finalized note and updates the status bar."""
-        if 'finalized_timestamp' not in self.note_data:
+        """Verifies the integrity of a note by checking for a .sig file."""
+        if not self.current_note_path:
             self.signal_label.setStyleSheet("background-color: #888; border-radius: 6px;")
             self.finalization_status_label.setText("Status: Not Finalized")
             self.finalization_status_label.setStyleSheet("color: #ccc;")
             return
 
-        stored_hash = self.note_data.get('content_hash')
-        timestamp_iso = self.note_data.get('finalized_timestamp')
+        sig_path = f"{self.current_note_path}.sig"
+        if not os.path.exists(sig_path):
+            self.signal_label.setStyleSheet("background-color: #888; border-radius: 6px;")
+            self.finalization_status_label.setText("Status: Not Finalized")
+            self.finalization_status_label.setStyleSheet("color: #ccc;")
+            return
 
-        # Format timestamp for display
+        # .sig file exists, so proceed with verification
         try:
+            with open(sig_path, 'r', encoding='utf-8') as f:
+                signature_data = json.load(f)
+            stored_hash = signature_data.get('content_hash')
+            timestamp_iso = signature_data.get('finalized_timestamp')
             dt_object = datetime.fromisoformat(timestamp_iso)
             display_timestamp = dt_object.strftime('%Y-%m-%d %H:%M:%S')
-        except (ValueError, TypeError):
-            display_timestamp = "Invalid Date"
+        except (IOError, json.JSONDecodeError, ValueError, TypeError) as e:
+            self.signal_label.setStyleSheet("background-color: #ffaa00; border-radius: 6px;") # Orange
+            self.finalization_status_label.setText("Status: Error reading signature file")
+            self.finalization_status_label.setStyleSheet("color: #ffaa00;")
+            print(f"Error reading or parsing signature file: {e}")
+            return
 
-        # Prepare data for hashing
-        data_to_hash = self.note_data.copy()
-        data_to_hash.pop('finalized_timestamp', None)
-        data_to_hash.pop('content_hash', None)
-
+        # Calculate hash of the current note data
         try:
-            serialized_data = json.dumps(data_to_hash, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
+            serialized_data = json.dumps(self.note_data, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
             current_hash = hashlib.sha256(serialized_data).hexdigest()
         except Exception as e:
             self.signal_label.setStyleSheet("background-color: #ffaa00; border-radius: 6px;") # Orange
