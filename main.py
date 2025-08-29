@@ -1942,7 +1942,14 @@ class MainWindow(QMainWindow):
             return
 
         stored_hash = self.note_data.get('content_hash')
-        timestamp = self.note_data.get('finalized_timestamp')
+        timestamp_iso = self.note_data.get('finalized_timestamp')
+
+        # Format timestamp for display
+        try:
+            dt_object = datetime.fromisoformat(timestamp_iso)
+            display_timestamp = dt_object.strftime('%Y-%m-%d %H:%M:%S')
+        except (ValueError, TypeError):
+            display_timestamp = "Invalid Date"
 
         # Prepare data for hashing
         data_to_hash = self.note_data.copy()
@@ -1953,7 +1960,7 @@ class MainWindow(QMainWindow):
             serialized_data = json.dumps(data_to_hash, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
             current_hash = hashlib.sha256(serialized_data).hexdigest()
         except Exception as e:
-            self.finalization_status_label.setText("Error during verification.")
+            self.finalization_status_label.setText(f"状態: ファイナライズ済み | 検証: エラー | タイムスタンプ: {display_timestamp}")
             self.finalization_status_label.setStyleSheet("color: #ffaa00;") # Orange for warning
             self.finalization_status_label.setVisible(True)
             print(f"Error during verification serialization: {e}")
@@ -1961,10 +1968,10 @@ class MainWindow(QMainWindow):
 
         self.finalization_status_label.setVisible(True)
         if current_hash == stored_hash:
-            self.finalization_status_label.setText(f"Verified ✓ Finalized on {timestamp.split('T')[0]} at {timestamp.split('T')[1].split('.')[0]}")
+            self.finalization_status_label.setText(f"状態: ファイナライズ済み | 検証: 成功 | タイムスタンプ: {display_timestamp}")
             self.finalization_status_label.setStyleSheet("color: #aaffaa;") # Green for success
         else:
-            self.finalization_status_label.setText("VERIFICATION FAILED: Note has been modified.")
+            self.finalization_status_label.setText(f"状態: ファイナライズ済み | 検証: 失敗 (コンテンツの不一致) | タイムスタンプ: {display_timestamp}")
             self.finalization_status_label.setStyleSheet("color: #ff5555;") # Red for failure
 
     def set_read_only(self, read_only):
