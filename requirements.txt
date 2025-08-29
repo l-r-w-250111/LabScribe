@@ -2,3 +2,6 @@ PyQt6
 matplotlib
 Markdown
 numpy
+holidays
+requests
+faiss-cpu
