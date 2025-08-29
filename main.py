@@ -7,6 +7,7 @@ import uuid
 import tempfile
 import base64
 import subprocess
+import hashlib
 import matplotlib
 import requests
 from datetime import datetime
@@ -19,7 +20,7 @@ from PyQt6.QtWidgets import (
     QFrame, QLabel, QListWidget, QListWidgetItem, QTextEdit,
     QScrollArea, QTextBrowser, QPushButton, QLineEdit, QFormLayout, QSizePolicy,
     QStackedWidget, QFileDialog, QGroupBox, QToolBar, QComboBox, QDialog, QTabWidget,
-    QInputDialog, QMessageBox
+    QInputDialog, QMessageBox, QAbstractItemView
 )
 
 # Local imports
@@ -1604,11 +1605,14 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.open_note)
         save_action = QAction("Save", self)
         save_action.triggered.connect(self.save_note)
+        self.finalize_action = QAction("Finalize", self)
+        self.finalize_action.triggered.connect(self.finalize_note)
         dashboard_action = QAction("Dashboard", self)
         dashboard_action.triggered.connect(self.show_dashboard)
         toolbar.addAction(new_action)
         toolbar.addAction(open_action)
         toolbar.addAction(save_action)
+        toolbar.addAction(self.finalize_action)
 
         toolbar.addSeparator()
         projects_action = QAction("Projects", self)
@@ -1624,6 +1628,13 @@ class MainWindow(QMainWindow):
         toolbar.addAction(samples_action)
 
         right_layout.addWidget(toolbar)
+
+        # --- Finalization Status ---
+        self.finalization_status_label = QLabel("")
+        self.finalization_status_label.setStyleSheet("color: #aaffaa; font-weight: bold;")
+        self.finalization_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.finalization_status_label.setVisible(False) # Initially hidden
+        right_layout.addWidget(self.finalization_status_label)
 
         # --- Outline ---
         # Create a header for the outline panel
@@ -1839,11 +1850,23 @@ class MainWindow(QMainWindow):
             self.add_module_widget(module_data["type"], module_data.get("content"), module_data["module_id"])
         self.show_note_view()
 
+        # After repopulating, check if the note is finalized and update UI
+        if 'finalized_timestamp' in self.note_data:
+            self.set_read_only(True)
+            self.verify_note_integrity()
+        else:
+            self.set_read_only(False)
+            self.finalization_status_label.setVisible(False)
+
+
     def new_note(self):
         self.current_note_path = None
         self.load_note(file_path=None)
         self.repopulate_modules()
         self.update_window_title()
+        # Ensure new notes are editable
+        self.set_read_only(False)
+        self.finalization_status_label.setVisible(False)
 
     def open_note(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Note", self.settings.get('save_folder'), "JSON Files (*.json)")
@@ -1870,6 +1893,114 @@ class MainWindow(QMainWindow):
         self.current_note_path = file_path
         self.update_window_title()
         print(f"Note saved to {file_path}")
+
+    def finalize_note(self):
+        """Finalizes the note by hashing its content and adding a timestamp."""
+        if 'finalized_timestamp' in self.note_data:
+            QMessageBox.information(self, "Already Finalized", "This note has already been finalized.")
+            return
+
+        reply = QMessageBox.question(self, "Finalize Note",
+                                     "Are you sure you want to finalize this note? This action cannot be undone and will make the note read-only.",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.No:
+            return
+
+        # Prepare data for hashing (exclude finalization keys)
+        data_to_hash = self.note_data.copy()
+        data_to_hash.pop('finalized_timestamp', None)
+        data_to_hash.pop('content_hash', None)
+
+        # Serialize to a canonical JSON string
+        try:
+            serialized_data = json.dumps(data_to_hash, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to serialize note data: {e}")
+            return
+
+        # Create hash
+        sha256_hash = hashlib.sha256(serialized_data).hexdigest()
+
+        # Add finalization data to the note
+        self.note_data['finalized_timestamp'] = datetime.now().isoformat()
+        self.note_data['content_hash'] = sha256_hash
+
+        # Save the finalized note
+        self.save_note()
+
+        # Update UI
+        self.set_read_only(True)
+        self.verify_note_integrity()
+        print(f"Note finalized with hash: {sha256_hash}")
+
+    def verify_note_integrity(self):
+        """Verifies the integrity of a finalized note and updates the UI label."""
+        if 'finalized_timestamp' not in self.note_data:
+            self.finalization_status_label.setVisible(False)
+            return
+
+        stored_hash = self.note_data.get('content_hash')
+        timestamp = self.note_data.get('finalized_timestamp')
+
+        # Prepare data for hashing
+        data_to_hash = self.note_data.copy()
+        data_to_hash.pop('finalized_timestamp', None)
+        data_to_hash.pop('content_hash', None)
+
+        try:
+            serialized_data = json.dumps(data_to_hash, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
+            current_hash = hashlib.sha256(serialized_data).hexdigest()
+        except Exception as e:
+            self.finalization_status_label.setText("Error during verification.")
+            self.finalization_status_label.setStyleSheet("color: #ffaa00;") # Orange for warning
+            self.finalization_status_label.setVisible(True)
+            print(f"Error during verification serialization: {e}")
+            return
+
+        self.finalization_status_label.setVisible(True)
+        if current_hash == stored_hash:
+            self.finalization_status_label.setText(f"Verified ✓ Finalized on {timestamp.split('T')[0]} at {timestamp.split('T')[1].split('.')[0]}")
+            self.finalization_status_label.setStyleSheet("color: #aaffaa;") # Green for success
+        else:
+            self.finalization_status_label.setText("VERIFICATION FAILED: Note has been modified.")
+            self.finalization_status_label.setStyleSheet("color: #ff5555;") # Red for failure
+
+    def set_read_only(self, read_only):
+        """Sets the entire note UI to be read-only or editable."""
+        # Disable/enable all module widgets
+        for widget in self.module_widgets.values():
+            # General input widgets
+            for child in widget.findChildren(QTextEdit):
+                child.setReadOnly(read_only)
+            for child in widget.findChildren(QLineEdit):
+                child.setReadOnly(read_only)
+            for child in widget.findChildren(QComboBox):
+                child.setEnabled(not read_only)
+            for child in widget.findChildren(QPushButton):
+                # Don't disable the "Open Project" button in the metadata module
+                if isinstance(widget, MetadataModuleWidget) and child is widget.open_project_button:
+                    continue
+                child.setEnabled(not read_only)
+
+            # Specific handling for TableWidget edit triggers
+            if isinstance(widget, TableModuleWidget):
+                if read_only:
+                    widget.table_widget.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+                else:
+                    widget.table_widget.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.SelectedClicked)
+
+        # Disable/enable main interaction elements
+        self.finalize_action.setEnabled(not read_only)
+        self.module_list_widget.setEnabled(not read_only)
+        self.trash_area.setAcceptDrops(not read_only)
+        self.trash_area.setStyleSheet("background-color: #444;" if not read_only else "background-color: #2d2d2d;")
+
+        # Also disable drag-and-drop on module titles
+        for widget in self.module_widgets.values():
+            widget.title_label.setCursor(Qt.CursorShape.ArrowCursor if read_only else Qt.CursorShape.OpenHandCursor)
+            widget.title_label.setEnabled(not read_only)
 
     def load_note(self, file_path=None):
         if file_path and os.path.exists(file_path):
