@@ -15,6 +15,10 @@ from urllib.parse import unquote
 from PyQt6.QtCore import Qt, QMimeData, QPoint, QUrl, QEvent, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QDrag, QPainter, QPixmap, QKeySequence, QAction
 from collections import defaultdict
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QFrame, QLabel, QListWidget, QListWidgetItem, QTextEdit,
@@ -870,6 +874,144 @@ Describe what results would support or refute the hypothesis and what constitute
             self.error_occurred.emit(error_message)
 
 
+# --- Settings Dialog ---
+class SettingsDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.main_window = parent
+        self.settings = self.main_window.settings
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(600)
+
+        # Main layout for the dialog
+        main_layout = QVBoxLayout(self)
+
+        # Use a QTabWidget for better organization
+        tabs = QTabWidget()
+        main_layout.addWidget(tabs)
+
+        # --- General Tab ---
+        general_tab = QWidget()
+        general_layout = QFormLayout(general_tab)
+
+        # Username
+        self.username_edit = QLineEdit(self.settings.get('username'))
+        self.username_edit.textChanged.connect(self.update_username)
+        general_layout.addRow("Username:", self.username_edit)
+
+        # Save Folder
+        save_folder_layout = QHBoxLayout()
+        self.save_folder_edit = QLineEdit(self.settings.get('save_folder'))
+        self.save_folder_edit.setReadOnly(True)
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self.browse_save_folder)
+        save_folder_layout.addWidget(self.save_folder_edit)
+        save_folder_layout.addWidget(browse_button)
+        general_layout.addRow("Save Folder:", save_folder_layout)
+
+        tabs.addTab(general_tab, "General")
+
+        # --- AI & Indexing Tab ---
+        ai_tab = QWidget()
+        ai_layout = QVBoxLayout(ai_tab)
+
+        # AI Search Indexing Group
+        indexing_group = QGroupBox("AI Search Index")
+        indexing_layout = QFormLayout(indexing_group)
+        self.build_index_button = QPushButton("Build/Update Search Index")
+        self.build_index_button.clicked.connect(self.start_indexing_process)
+        indexing_layout.addRow(self.build_index_button)
+        last_indexed_time = self.settings.get('last_indexed') or "Never"
+        self.indexing_status_label = QLabel(f"Status: Last indexed on {last_indexed_time}")
+        indexing_layout.addRow(self.indexing_status_label)
+        ai_layout.addWidget(indexing_group)
+        ai_layout.addStretch()
+        tabs.addTab(ai_tab, "AI & Indexing")
+
+        # --- Cryptography Tab ---
+        crypto_tab = QWidget()
+        crypto_layout = QFormLayout(crypto_tab)
+
+        self.public_key_display = QTextEdit()
+        self.public_key_display.setReadOnly(True)
+        self.public_key_display.setPlaceholderText("Load or generate a private key to see the public key here.")
+        # If a key is already loaded in main window, display it
+        if self.main_window.private_key:
+            public_key = self.main_window.private_key.public_key()
+            public_pem = public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            self.public_key_display.setPlainText(public_pem.decode('utf-8'))
+
+        crypto_layout.addRow(QLabel("Your Public Key:"), self.public_key_display)
+
+        key_button_layout = QHBoxLayout()
+        self.generate_key_button = QPushButton("Generate New Keys")
+        self.generate_key_button.clicked.connect(self.generate_keys)
+        self.load_key_button = QPushButton("Load Private Key")
+        self.load_key_button.clicked.connect(self.load_private_key)
+        key_button_layout.addWidget(self.generate_key_button)
+        key_button_layout.addWidget(self.load_key_button)
+        crypto_layout.addRow(key_button_layout)
+        tabs.addTab(crypto_tab, "Cryptography")
+
+        # --- Close Button ---
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        main_layout.addWidget(close_button, 0, Qt.AlignmentFlag.AlignRight)
+
+    def update_username(self, new_username):
+        self.settings.set('username', new_username)
+
+    def browse_save_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Save Folder", self.settings.get('save_folder'))
+        if folder:
+            self.settings.set('save_folder', folder)
+            self.save_folder_edit.setText(folder)
+            # We might need to inform the main window if other parts depend on this
+            self.main_window.on_settings_changed()
+
+    def start_indexing_process(self):
+        self.build_index_button.setEnabled(False)
+        self.build_index_button.setText("Indexing...")
+        self.indexing_status_label.setText("Status: Indexing in progress...")
+        # Use the main window's worker management
+        self.main_window.start_indexing_process(self.on_indexing_finished)
+
+    def on_indexing_finished(self, success):
+        self.build_index_button.setEnabled(True)
+        self.build_index_button.setText("Build/Update Search Index")
+        if success:
+            last_indexed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.settings.set('last_indexed', last_indexed)
+            self.indexing_status_label.setText(f"Status: Last indexed on {last_indexed}")
+        else:
+            self.indexing_status_label.setText("Status: Indexing failed. See console for errors.")
+
+    def generate_keys(self):
+        # This can call the main window's method directly
+        self.main_window.generate_keys()
+        # Refresh the public key display after generation
+        self.refresh_public_key_display()
+
+    def load_private_key(self):
+        # This can call the main window's method directly
+        self.main_window.load_private_key()
+        # Refresh the public key display after loading
+        self.refresh_public_key_display()
+
+    def refresh_public_key_display(self):
+        if self.main_window.private_key:
+            public_key = self.main_window.private_key.public_key()
+            public_pem = public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            self.public_key_display.setPlainText(public_pem.decode('utf-8'))
+        else:
+            self.public_key_display.clear()
+
 # --- Main Application ---
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -900,6 +1042,113 @@ class MainWindow(QMainWindow):
         self.suggestion_worker = None
         self.last_search_query = None
         self.last_search_results = None
+        self.private_key = None
+        self.is_read_only_state = False
+        self.indexing_callback = None
+
+    def generate_keys(self):
+        """Generates a new RSA key pair and saves it, with an optional password."""
+        password, ok = QInputDialog.getText(self, "Create Password", "Enter a password to encrypt your new private key (optional):", QLineEdit.EchoMode.Password)
+        if not ok:
+            return # User cancelled
+
+        encryption_algorithm = None
+        if password:
+            encryption_algorithm = serialization.BestAvailableEncryption(password.encode('utf-8'))
+        else:
+            # If no password, warn the user and ask for confirmation
+            reply = QMessageBox.warning(self, "Security Warning",
+                                        "Are you sure you want to save the private key without a password?\n\n"
+                                        "Anyone with access to the key file will be able to sign notes as you. This is not recommended.",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                                        QMessageBox.StandardButton.Cancel)
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            encryption_algorithm = serialization.NoEncryption()
+
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=4096,
+            backend=default_backend()
+        )
+
+        # Ask user where to save the key
+        default_path = os.path.join(os.path.expanduser("~"), ".labscribe_private_key.pem")
+        key_path, _ = QFileDialog.getSaveFileName(self, "Save Private Key", default_path, "PEM Files (*.pem)")
+
+        if not key_path:
+            return
+
+        # Encrypt and serialize the private key
+        pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=encryption_algorithm
+        )
+
+        try:
+            with open(key_path, 'wb') as f:
+                f.write(pem)
+            # Save the path to settings for auto-loading next time
+            self.settings.set('private_key_path', key_path)
+
+            if password:
+                QMessageBox.information(self, "Success", f"Private key saved to {key_path}. Don't forget your password!")
+            else:
+                QMessageBox.information(self, "Success", f"Private key saved to {key_path} without a password.")
+
+            # Load the newly generated key
+            self.load_private_key(key_path=key_path, password=password)
+        except IOError as e:
+            QMessageBox.critical(self, "Error", f"Could not save private key: {e}")
+
+
+    def load_private_key(self, key_path=None, password=None):
+        """Loads a private key from a file, asking for a password if needed."""
+        if not key_path:
+            key_path, _ = QFileDialog.getOpenFileName(self, "Load Private Key", os.path.expanduser("~"), "PEM Files (*.pem)")
+            if not key_path:
+                return
+
+        if not os.path.exists(key_path):
+            QMessageBox.warning(self, "File Not Found", "The specified key file does not exist.")
+            return
+
+        if not password:
+            password, ok = QInputDialog.getText(self, "Enter Password", "Enter the password for your private key:", QLineEdit.EchoMode.Password)
+            if not ok or not password:
+                return
+
+        try:
+            with open(key_path, "rb") as key_file:
+                self.private_key = serialization.load_pem_private_key(
+                    key_file.read(),
+                    password=password.encode('utf-8'),
+                    backend=default_backend()
+                )
+            # If successful, store path for next time
+            self.settings.set('private_key_path', key_path)
+
+            # Display the public key
+            public_key = self.private_key.public_key()
+            public_pem = public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            self.public_key_display.setPlainText(public_pem.decode('utf-8'))
+            QMessageBox.information(self, "Success", "Private key loaded successfully.")
+            # Re-run verification in case a note is already loaded
+            self.verify_note_integrity()
+
+        except (ValueError, TypeError) as e:
+            QMessageBox.critical(self, "Decryption Failed", "Could not decrypt the private key. The password may be incorrect.")
+            print(f"Key loading error: {e}")
+            self.private_key = None
+            self.public_key_display.clear()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An unexpected error occurred while loading the key: {e}")
+            self.private_key = None
+            self.public_key_display.clear()
 
     def setup_status_bar(self):
         """Sets up the widgets for the status bar."""
@@ -1055,27 +1304,19 @@ class MainWindow(QMainWindow):
         self.suggestion_worker = None # Clean up
 
 
-    def start_indexing_process(self):
+    def start_indexing_process(self, on_finish_callback=None):
         """Starts the background thread to build the search index."""
-        self.build_index_button.setEnabled(False)
-        self.build_index_button.setText("Indexing...")
-        self.indexing_status_label.setText("Status: Indexing in progress...")
-
+        self.indexing_callback = on_finish_callback
         self.indexing_worker = IndexingWorker()
-        self.indexing_worker.finished.connect(self.on_indexing_finished)
+        self.indexing_worker.finished.connect(self._on_indexing_worker_finished)
         self.indexing_worker.start()
 
-    def on_indexing_finished(self, success):
-        """Called when the indexing worker thread has finished."""
-        self.build_index_button.setEnabled(True)
-        self.build_index_button.setText("Build/Update Search Index")
-        if success:
-            last_indexed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.settings.set('last_indexed', last_indexed)
-            self.indexing_status_label.setText(f"Status: Last indexed on {last_indexed}")
-        else:
-            self.indexing_status_label.setText("Status: Indexing failed. See console for errors.")
+    def _on_indexing_worker_finished(self, success):
+        """Internal handler for when the indexing worker is done."""
+        if self.indexing_callback:
+            self.indexing_callback(success)
         self.indexing_worker = None # Clean up
+        self.indexing_callback = None # Clear callback
 
     def _open_project_view(self, project_path):
         """Creates and displays the ProjectView for a given project path."""
@@ -1488,10 +1729,12 @@ class MainWindow(QMainWindow):
         self.toggle_left_panel_button.clicked.connect(self.toggle_left_panel)
         header_layout.addWidget(self.toggle_left_panel_button)
 
-        # --- Settings --- 
-        self.setup_settings_ui(self.left_layout)
+        # --- Settings ---
+        self.settings_button = QPushButton("Settings...")
+        self.settings_button.clicked.connect(self.open_settings_dialog)
+        self.left_layout.addWidget(self.settings_button)
 
-        # --- Available Modules --- 
+        # --- Available Modules ---
         self.modules_group = QGroupBox("Available Modules")
         modules_layout = QVBoxLayout(self.modules_group)
         self.module_list_widget = DraggableModuleList()
@@ -1506,94 +1749,15 @@ class MainWindow(QMainWindow):
         self.left_layout.addWidget(self.trash_area)
         self.main_layout.addWidget(self.left_frame)
 
-    def setup_settings_ui(self, parent_layout):
-        self.settings_group = QGroupBox("Settings")
-        settings_layout = QFormLayout(self.settings_group)
-        
-        # Username
-        self.username_edit = QLineEdit(self.settings.get('username'))
-        self.username_edit.textChanged.connect(self.update_username)
-        settings_layout.addRow("Username:", self.username_edit)
+    def open_settings_dialog(self):
+        """Opens the settings dialog."""
+        dialog = SettingsDialog(self)
+        dialog.exec()
 
-        # Save Folder
-        save_folder_layout = QHBoxLayout()
-        self.save_folder_edit = QLineEdit(self.settings.get('save_folder'))
-        self.save_folder_edit.setReadOnly(True)
-        browse_button = QPushButton("Browse...")
-        browse_button.clicked.connect(self.browse_save_folder)
-        save_folder_layout.addWidget(self.save_folder_edit)
-        save_folder_layout.addWidget(browse_button)
-        settings_layout.addRow("Save Folder:", save_folder_layout)
-
-        # --- AI Search Indexing ---
-        settings_layout.addRow(QLabel("<b>AI Search Index</b>"))
-        self.build_index_button = QPushButton("Build/Update Search Index")
-        self.build_index_button.clicked.connect(self.start_indexing_process)
-        settings_layout.addRow(self.build_index_button)
-
-        last_indexed_time = self.settings.get('last_indexed') or "Never"
-        self.indexing_status_label = QLabel(f"Status: Last indexed on {last_indexed_time}")
-        settings_layout.addRow(self.indexing_status_label)
-
-
-        parent_layout.addWidget(self.settings_group)
-
-        # --- AI Search ---
-        self.search_group = QGroupBox("AI Search")
-        search_layout = QVBoxLayout(self.search_group)
-
-        self.search_query_input = QLineEdit()
-        self.search_query_input.setPlaceholderText("Enter your question...")
-        self.search_query_input.returnPressed.connect(self.start_search) # Allow pressing Enter
-        search_layout.addWidget(self.search_query_input)
-
-        self.search_button = QPushButton("Search")
-        self.search_button.clicked.connect(self.start_search)
-        search_layout.addWidget(self.search_button)
-
-        # --- Answer Display ---
-        self.answer_display_label = QLabel("<b>AI Generated Answer:</b>")
-        search_layout.addWidget(self.answer_display_label)
-        self.answer_browser = QTextBrowser()
-        self.answer_browser.setMinimumHeight(150)
-        self.answer_browser.setVisible(False) # Initially hidden
-        self.answer_display_label.setVisible(False)
-        search_layout.addWidget(self.answer_browser)
-
-        # --- Generate Answer Button ---
-        self.generate_answer_button = QPushButton("Generate Answer from Results")
-        self.generate_answer_button.setEnabled(False)
-        self.generate_answer_button.clicked.connect(self.start_answer_generation)
-        search_layout.addWidget(self.generate_answer_button)
-
-        # --- Search Results ---
-        self.results_display_label = QLabel("<b>Retrieved Notes (Sources):</b>")
-        search_layout.addWidget(self.results_display_label)
-
-        self.search_results_list = QListWidget()
-        self.search_results_list.setMinimumHeight(200)
-        self.search_results_list.itemSelectionChanged.connect(
-            lambda: self.open_search_result_button.setEnabled(True)
-        )
-        self.search_results_list.itemDoubleClicked.connect(self._open_selected_search_result)
-        search_layout.addWidget(self.search_results_list)
-
-        self.open_search_result_button = QPushButton("Open Selected Note")
-        self.open_search_result_button.setEnabled(False)
-        self.open_search_result_button.clicked.connect(self._open_selected_search_result)
-        search_layout.addWidget(self.open_search_result_button)
-
-        parent_layout.addWidget(self.search_group)
-
-
-    def update_username(self, new_username):
-        self.settings.set('username', new_username)
-
-    def browse_save_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Save Folder", self.settings.get('save_folder'))
-        if folder:
-            self.settings.set('save_folder', folder)
-            self.save_folder_edit.setText(folder)
+    def on_settings_changed(self):
+        """Called when a setting that affects the main UI is changed."""
+        # For now, just a placeholder. Could be used to refresh project lists etc.
+        print("Settings changed.")
 
     def toggle_left_panel(self):
         if self.left_frame.width() > 50:
@@ -1688,6 +1852,14 @@ class MainWindow(QMainWindow):
         self.main_view_stack.addWidget(self.sample_view_container)
 
         right_layout.addWidget(self.main_view_stack)
+
+        # --- Read-Only Banner ---
+        self.read_only_banner = QLabel("This note is finalized and read-only.")
+        self.read_only_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.read_only_banner.setStyleSheet("background-color: #553300; color: #ffcc00; padding: 5px; font-weight: bold;")
+        self.read_only_banner.setVisible(False) # Hidden by default
+        right_layout.addWidget(self.read_only_banner)
+
         self.main_layout.addWidget(right_widget, 1)
 
     def show_note_view(self):
@@ -1926,25 +2098,55 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.No:
             return
 
-        # self.note_data should be clean, as it's just been saved.
-        # We hash the data that was just written to the file.
+        if not self.private_key:
+            self.load_private_key()
+            # If key is still not loaded after trying, abort.
+            if not self.private_key:
+                QMessageBox.critical(self, "Error", "A private key must be loaded to finalize the note.")
+                return
+
+        # --- Data Normalization ---
+        # Ensure data is in the same format as it would be when loaded by widgets.
+        for module in self.note_data.get("modules", []):
+            if module.get("type") == GANTT_CHART_MODULE_TYPE:
+                if isinstance(module.get("content"), str):
+                    module["content"] = {"data": module.get("content"), "height": 300}
+
+        # Hash the note content
         try:
             serialized_data = json.dumps(self.note_data, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
-            content_hash = hashlib.sha256(serialized_data).hexdigest()
+            h = hashlib.sha256(serialized_data).digest()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to serialize note data for hashing: {e}")
             return
 
-        # Create signature file
+        # Sign the hash with the private key
+        signature = self.private_key.sign(
+            h,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+
+        # Get public key to store alongside the signature
+        public_key_pem = self.private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+
+        # Create signature file data
         signature_data = {
-            'finalized_timestamp': datetime.now().isoformat(),
-            'content_hash': content_hash
+            'author_public_key': public_key_pem.decode('utf-8'),
+            'signature': base64.b64encode(signature).decode('utf-8'),
+            'finalized_timestamp': datetime.now().isoformat()
         }
 
         try:
             with open(sig_path, "w", encoding="utf-8") as f:
                 json.dump(signature_data, f, indent=4)
-            print(f"Signature file created at {sig_path} with hash {content_hash}")
+            print(f"Signature file created at {sig_path}")
         except IOError as e:
             QMessageBox.critical(self, "Error", f"Failed to write signature file: {e}")
             return
@@ -1972,13 +2174,18 @@ class MainWindow(QMainWindow):
         try:
             with open(sig_path, 'r', encoding='utf-8') as f:
                 signature_data = json.load(f)
-            stored_hash = signature_data.get('content_hash')
+
+            public_key_pem = signature_data.get('author_public_key').encode('utf-8')
+            signature = base64.b64decode(signature_data.get('signature'))
             timestamp_iso = signature_data.get('finalized_timestamp')
+
+            public_key = serialization.load_pem_public_key(public_key_pem, backend=default_backend())
             dt_object = datetime.fromisoformat(timestamp_iso)
             display_timestamp = dt_object.strftime('%Y-%m-%d %H:%M:%S')
-        except (IOError, json.JSONDecodeError, ValueError, TypeError) as e:
+
+        except (IOError, json.JSONDecodeError, ValueError, TypeError, KeyError) as e:
             self.signal_label.setStyleSheet("background-color: #ffaa00; border-radius: 6px;") # Orange
-            self.finalization_status_label.setText("Status: Error reading signature file")
+            self.finalization_status_label.setText("Status: Invalid or corrupt signature file")
             self.finalization_status_label.setStyleSheet("color: #ffaa00;")
             print(f"Error reading or parsing signature file: {e}")
             return
@@ -1986,25 +2193,39 @@ class MainWindow(QMainWindow):
         # Calculate hash of the current note data
         try:
             serialized_data = json.dumps(self.note_data, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
-            current_hash = hashlib.sha256(serialized_data).hexdigest()
+            h = hashlib.sha256(serialized_data).digest()
         except Exception as e:
             self.signal_label.setStyleSheet("background-color: #ffaa00; border-radius: 6px;") # Orange
-            self.finalization_status_label.setText(f"Status: Verification Error | Finalized: {display_timestamp}")
+            self.finalization_status_label.setText(f"Status: Hashing Error | Finalized: {display_timestamp}")
             self.finalization_status_label.setStyleSheet("color: #ffaa00;")
-            print(f"Error during verification serialization: {e}")
+            print(f"Error during note serialization for verification: {e}")
             return
 
-        if current_hash == stored_hash:
+        # Verify the signature
+        try:
+            public_key.verify(
+                signature,
+                h,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+            # If we reach here, the signature is valid
             self.signal_label.setStyleSheet("background-color: #aaffaa; border-radius: 6px;") # Green
-            self.finalization_status_label.setText(f"Status: Verified | Finalized: {display_timestamp}")
+            self.finalization_status_label.setText(f"Status: Signature Verified (by Public Key) | Finalized: {display_timestamp}")
             self.finalization_status_label.setStyleSheet("color: #aaffaa;")
-        else:
+
+        except Exception as e: # Catches InvalidSignature and other potential errors
             self.signal_label.setStyleSheet("background-color: #ff5555; border-radius: 6px;") # Red
-            self.finalization_status_label.setText(f"Status: Verification FAILED | Finalized: {display_timestamp}")
+            self.finalization_status_label.setText(f"Status: INVALID SIGNATURE | Finalized: {display_timestamp}")
             self.finalization_status_label.setStyleSheet("color: #ff5555;")
+            print(f"Signature verification failed: {e}")
 
     def set_read_only(self, read_only):
         """Sets the entire note UI to be read-only or editable."""
+        self.is_read_only_state = read_only
         # Disable/enable all module widgets
         for widget in self.module_widgets.values():
             # General input widgets
@@ -2038,6 +2259,9 @@ class MainWindow(QMainWindow):
             widget.title_label.setCursor(Qt.CursorShape.ArrowCursor if read_only else Qt.CursorShape.OpenHandCursor)
             widget.title_label.setEnabled(not read_only)
 
+        # Show/hide the read-only banner
+        self.read_only_banner.setVisible(read_only)
+
     def load_note(self, file_path=None):
         if file_path and os.path.exists(file_path):
             try:
@@ -2065,7 +2289,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(title)
 
     def closeEvent(self, event):
-        self.save_note()
+        # Only save the note on close if it's not in a read-only state
+        if not self.is_read_only_state:
+            self.save_note()
         super().closeEvent(event)
 
 if __name__ == '__main__':

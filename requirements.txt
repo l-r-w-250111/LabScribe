@@ -6,3 +6,4 @@ holidays
 requests
 faiss-cpu
 qrcode[pil]
+cryptography
