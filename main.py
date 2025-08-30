@@ -2143,12 +2143,19 @@ class MainWindow(QMainWindow):
                 if isinstance(module.get("content"), str):
                     module["content"] = {"data": module.get("content"), "height": 300}
 
-        # Hash the note content
+        # --- Create the data package to be signed ---
+        signing_timestamp = datetime.now().isoformat()
+        data_to_sign = {
+            'note_content': self.note_data,
+            'timestamp': signing_timestamp
+        }
+
+        # Hash the combined data (note content + timestamp)
         try:
-            serialized_data = json.dumps(self.note_data, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
+            serialized_data = json.dumps(data_to_sign, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
             h = hashlib.sha256(serialized_data).digest()
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to serialize note data for hashing: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to serialize data for hashing: {e}")
             return
 
         # Sign the hash with the private key
@@ -2171,7 +2178,7 @@ class MainWindow(QMainWindow):
         signature_data = {
             'author_public_key': public_key_pem.decode('utf-8'),
             'signature': base64.b64encode(signature).decode('utf-8'),
-            'finalized_timestamp': datetime.now().isoformat()
+            'finalized_timestamp': signing_timestamp
         }
 
         try:
@@ -2221,15 +2228,21 @@ class MainWindow(QMainWindow):
             print(f"Error reading or parsing signature file: {e}")
             return
 
-        # Calculate hash of the current note data
+        # Re-create the data structure that was signed
+        data_to_verify = {
+            'note_content': self.note_data,
+            'timestamp': timestamp_iso
+        }
+
+        # Calculate hash of the combined data
         try:
-            serialized_data = json.dumps(self.note_data, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
+            serialized_data = json.dumps(data_to_verify, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
             h = hashlib.sha256(serialized_data).digest()
         except Exception as e:
             self.signal_label.setStyleSheet("background-color: #ffaa00; border-radius: 6px;") # Orange
             self.finalization_status_label.setText(f"Status: Hashing Error | Finalized: {display_timestamp}")
             self.finalization_status_label.setStyleSheet("color: #ffaa00;")
-            print(f"Error during note serialization for verification: {e}")
+            print(f"Error during data serialization for verification: {e}")
             return
 
         # Verify the signature
