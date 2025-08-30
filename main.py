@@ -1130,13 +1130,7 @@ class MainWindow(QMainWindow):
             # If successful, store path for next time
             self.settings.set('private_key_path', key_path)
 
-            # Display the public key
-            public_key = self.private_key.public_key()
-            public_pem = public_key.public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            )
-            self.public_key_display.setPlainText(public_pem.decode('utf-8'))
+            # The key is loaded. The SettingsDialog will be responsible for refreshing its own display.
             QMessageBox.information(self, "Success", "Private key loaded successfully.")
             # Re-run verification in case a note is already loaded
             self.verify_note_integrity()
@@ -1145,11 +1139,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Decryption Failed", "Could not decrypt the private key. The password may be incorrect.")
             print(f"Key loading error: {e}")
             self.private_key = None
-            self.public_key_display.clear()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An unexpected error occurred while loading the key: {e}")
             self.private_key = None
-            self.public_key_display.clear()
 
     def setup_status_bar(self):
         """Sets up the widgets for the status bar."""
