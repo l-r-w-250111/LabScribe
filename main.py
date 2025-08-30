@@ -1045,6 +1045,7 @@ class MainWindow(QMainWindow):
         self.private_key = None
         self.is_read_only_state = False
         self.indexing_callback = None
+        self.is_dirty = False
 
     def generate_keys(self):
         """Generates a new RSA key pair and saves it, with an optional password."""
@@ -1992,10 +1993,12 @@ class MainWindow(QMainWindow):
         for module in self.note_data["modules"]:
             if module["module_id"] == module_id:
                 module["content"] = new_content
+                self.is_dirty = True
                 # When content changes, the summary is no longer valid
                 if "summary" in module:
                     del module["summary"]
         self.update_outline()
+        self.update_window_title()
 
     def adjust_outline_height(self):
         doc_height = self.outline_browser.document().size().height()
@@ -2040,8 +2043,32 @@ class MainWindow(QMainWindow):
         self.set_read_only(is_finalized)
         self.verify_note_integrity()
 
+    def check_unsaved_changes(self):
+        """
+        Checks if there are unsaved changes and prompts the user to save them.
+        Returns True if the calling action should proceed, False if it should be cancelled.
+        """
+        if not self.is_dirty:
+            return True
+
+        reply = QMessageBox.question(self, "Unsaved Changes",
+                                     "You have unsaved changes. Do you want to save them before proceeding?",
+                                     QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                                     QMessageBox.StandardButton.Cancel)
+
+        if reply == QMessageBox.StandardButton.Save:
+            self.save_note()
+            # If save_note was cancelled (e.g. user closes file dialog), is_dirty will still be true
+            return not self.is_dirty
+        elif reply == QMessageBox.StandardButton.Cancel:
+            return False
+        else: # Discard
+            return True
 
     def new_note(self):
+        if not self.check_unsaved_changes():
+            return
+
         self.current_note_path = None
         self.load_note(file_path=None)
         self.repopulate_modules()
@@ -2051,6 +2078,9 @@ class MainWindow(QMainWindow):
         self.verify_note_integrity()
 
     def open_note(self):
+        if not self.check_unsaved_changes():
+            return
+
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Note", self.settings.get('save_folder'), "JSON Files (*.json)")
         if file_path:
             self.load_note(file_path)
@@ -2073,6 +2103,7 @@ class MainWindow(QMainWindow):
             json.dump(self.note_data, f, indent=4, ensure_ascii=False)
         
         self.current_note_path = file_path
+        self.is_dirty = False
         self.update_window_title()
         print(f"Note saved to {file_path}")
         return file_path
@@ -2278,6 +2309,7 @@ class MainWindow(QMainWindow):
                 "modules": []
             }
             self.current_note_path = None
+        self.is_dirty = False
         self.update_window_title()
 
     def update_window_title(self):
@@ -2286,13 +2318,17 @@ class MainWindow(QMainWindow):
             title += f" - {os.path.basename(self.current_note_path)}"
         else:
             title += " - New Note"
+
+        if self.is_dirty:
+            title += "*"
+
         self.setWindowTitle(title)
 
     def closeEvent(self, event):
-        # Only save the note on close if it's not in a read-only state
-        if not self.is_read_only_state:
-            self.save_note()
-        super().closeEvent(event)
+        if self.check_unsaved_changes():
+            super().closeEvent(event)
+        else:
+            event.ignore()
 
 if __name__ == '__main__':
     try:
