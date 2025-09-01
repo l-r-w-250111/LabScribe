@@ -24,10 +24,12 @@ from PyQt6.QtWidgets import (
     QFrame, QLabel, QListWidget, QListWidgetItem, QTextEdit,
     QScrollArea, QTextBrowser, QPushButton, QLineEdit, QFormLayout, QSizePolicy,
     QStackedWidget, QFileDialog, QGroupBox, QToolBar, QComboBox, QDialog, QTabWidget,
-    QInputDialog, QMessageBox, QAbstractItemView
+    QInputDialog, QMessageBox, QAbstractItemView, QCheckBox
 )
 
 # Local imports
+import certifi
+from rfc3161_client import TimestampRequestBuilder, decode_timestamp_response, VerifierBuilder, VerificationError
 from chart_widget import ChartWidget
 from table_widget import TableWidget
 from gantt_chart_widget import GanttChartWidget
@@ -954,6 +956,22 @@ class SettingsDialog(QDialog):
         key_button_layout.addWidget(self.generate_key_button)
         key_button_layout.addWidget(self.load_key_button)
         crypto_layout.addRow(key_button_layout)
+
+        # --- Timestamping Group ---
+        timestamp_group = QGroupBox("Trusted Timestamping")
+        timestamp_layout = QFormLayout(timestamp_group)
+        self.use_tsa_checkbox = QCheckBox("Use a Trusted Timestamping Authority (TSA)")
+        self.use_tsa_checkbox.setChecked(self.settings.get('use_tsa'))
+        self.tsa_url_edit = QLineEdit(self.settings.get('tsa_url'))
+        self.tsa_url_edit.setEnabled(self.use_tsa_checkbox.isChecked())
+        timestamp_layout.addRow(self.use_tsa_checkbox)
+        timestamp_layout.addRow("TSA URL:", self.tsa_url_edit)
+        crypto_layout.addWidget(timestamp_group)
+
+        # Connect signals
+        self.use_tsa_checkbox.stateChanged.connect(self.on_tsa_checkbox_changed)
+        self.tsa_url_edit.textChanged.connect(self.on_tsa_url_changed)
+
         tabs.addTab(crypto_tab, "Cryptography")
 
         # --- Close Button ---
@@ -1000,6 +1018,14 @@ class SettingsDialog(QDialog):
         self.main_window.load_private_key()
         # Refresh the public key display after loading
         self.refresh_public_key_display()
+
+    def on_tsa_checkbox_changed(self, state):
+        is_checked = self.use_tsa_checkbox.isChecked()
+        self.settings.set('use_tsa', is_checked)
+        self.tsa_url_edit.setEnabled(is_checked)
+
+    def on_tsa_url_changed(self, text):
+        self.settings.set('tsa_url', text)
 
     def refresh_public_key_display(self):
         if self.main_window.private_key:
@@ -2166,12 +2192,38 @@ class MainWindow(QMainWindow):
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
 
+        # --- Timestamping (if enabled) ---
+        timestamp_token = None
+        if self.settings.get('use_tsa'):
+            tsa_url = self.settings.get('tsa_url')
+            if not tsa_url:
+                QMessageBox.warning(self, "Timestamping Failed", "TSA URL is not configured. Proceeding without timestamp.")
+            else:
+                try:
+                    # Build the timestamp request using the same hash we sign
+                    ts_request = TimestampRequestBuilder().data(h).build()
+                    # Make the request
+                    response = requests.post(
+                        tsa_url,
+                        data=ts_request.as_bytes(),
+                        headers={"Content-Type": "application/timestamp-query"},
+                        timeout=10 # Add a timeout
+                    )
+                    response.raise_for_status()
+                    # We store the raw response content (the token)
+                    timestamp_token = response.content
+                    print("Successfully received timestamp token.")
+                except Exception as e:
+                    QMessageBox.warning(self, "Timestamping Failed", f"Could not get timestamp from {tsa_url}.\nError: {e}\n\nProceeding without timestamp.")
+
         # Create signature file data
         signature_data = {
             'author_public_key': public_key_pem.decode('utf-8'),
             'signature': base64.b64encode(signature).decode('utf-8'),
-            'finalized_timestamp': signing_timestamp
+            'finalized_timestamp': signing_timestamp,
         }
+        if timestamp_token:
+            signature_data['timestamp_token'] = base64.b64encode(timestamp_token).decode('utf-8')
 
         try:
             with open(sig_path, "w", encoding="utf-8") as f:
@@ -2250,8 +2302,44 @@ class MainWindow(QMainWindow):
             )
             # If we reach here, the signature is valid
             self.signal_label.setStyleSheet("background-color: #aaffaa; border-radius: 6px;") # Green
-            self.finalization_status_label.setText(f"Status: Signature Verified (by Public Key) | Finalized: {display_timestamp}")
+            base_status_text = f"Signature Verified (by Public Key) | Finalized: {display_timestamp}"
+            self.finalization_status_label.setText(base_status_text)
             self.finalization_status_label.setStyleSheet("color: #aaffaa;")
+
+            # --- Now, verify timestamp if it exists ---
+            if 'timestamp_token' in signature_data:
+                try:
+                    ts_token_b64 = signature_data['timestamp_token']
+                    ts_token_der = base64.b64decode(ts_token_b64)
+                    ts_response = decode_timestamp_response(ts_token_der)
+
+                    # Get trusted root certs from certifi
+                    with open(certifi.where(), "rb") as f:
+                        cert_authorities = serialization.load_pem_x509_certificates(f.read())
+
+                    # Check against all known CAs
+                    verified = False
+                    for cert in cert_authorities:
+                        builder = VerifierBuilder().add_root_certificate(cert)
+                        try:
+                            # Must build the verifier for each cert
+                            verifier = builder.build()
+                            verifier.verify(ts_response, data=h)
+                            verified = True
+                            break # Found a valid chain
+                        except VerificationError:
+                            continue # Try the next certificate
+
+                    if verified:
+                        self.finalization_status_label.setText(f"{base_status_text} | Timestamp Verified")
+                    else:
+                        self.finalization_status_label.setText(f"{base_status_text} | Timestamp UNVERIFIED")
+                        self.finalization_status_label.setStyleSheet("color: #ffaa00;") # Orange for unverified timestamp
+
+                except Exception as ts_e:
+                    print(f"Timestamp verification error: {ts_e}")
+                    self.finalization_status_label.setText(f"{base_status_text} | Timestamp Invalid/Error")
+                    self.finalization_status_label.setStyleSheet("color: #ffaa00;") # Orange for error
 
         except Exception as e: # Catches InvalidSignature and other potential errors
             self.signal_label.setStyleSheet("background-color: #ff5555; border-radius: 6px;") # Red

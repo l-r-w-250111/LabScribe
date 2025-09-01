@@ -6,7 +6,9 @@ class Settings:
         self.file_path = file_path
         self.defaults = {
             'username': 'Default User',
-            'save_folder': os.path.join(os.path.expanduser('~'), 'ELN_Notes')
+            'save_folder': os.path.join(os.path.expanduser('~'), 'ELN_Notes'),
+            'use_tsa': False,
+            'tsa_url': 'https://freetsa.org/tsr'
         }
         self.data = self.defaults.copy()
         self.load()

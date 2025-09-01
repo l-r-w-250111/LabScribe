@@ -7,3 +7,4 @@ requests
 faiss-cpu
 qrcode[pil]
 cryptography
+rfc3161-client

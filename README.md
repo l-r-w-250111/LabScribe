@@ -40,6 +40,10 @@ The application includes **AI-powered summarization**, a full **Project Manageme
     ```sh
     npm install -g @mermaid-js/mermaid-cli
     ```
+*   **System Dependencies (for Linux):** The application requires certain Qt libraries to run. On Debian/Ubuntu-based systems, you can install them with:
+    ```sh
+    sudo apt-get update && sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1
+    ```
 
 ### 2. Installation & Setup
 
