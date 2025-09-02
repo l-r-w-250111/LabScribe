@@ -40,6 +40,10 @@ The application includes **AI-powered summarization**, a full **Project Manageme
     ```sh
     npm install -g @mermaid-js/mermaid-cli
     ```
+*   **Qt Platform Dependencies (for Linux):** To run the graphical interface on Linux, you may need to install several platform-specific libraries. On Debian-based systems (like Ubuntu), you can do this with:
+    ```sh
+    sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1 libxcb-xkb1
+    ```
 *   **OpenSSL:** The Trusted Timestamping feature requires `openssl` to be installed and available in the system's PATH.
     *   **Linux/macOS:** OpenSSL is usually pre-installed.
     *   **Windows:** You can install OpenSSL using a pre-compiled binary from a source like [slproweb.com/products/Win32OpenSSL.html](https://slproweb.com/products/Win32OpenSSL.html).

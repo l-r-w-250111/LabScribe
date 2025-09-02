@@ -28,7 +28,6 @@ from PyQt6.QtWidgets import (
 )
 
 # Local imports
-from tsp_client import TSPSigner, TSPVerifier, SigningSettings
 from chart_widget import ChartWidget
 from table_widget import TableWidget
 from gantt_chart_widget import GanttChartWidget
