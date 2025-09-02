@@ -108,7 +108,7 @@ This application relies on a local Ollama instance to function.
 *   [x] KPI/resource dashboard
 *   [x] Project Management View
 *   [x] AI-powered search (RAG)
-*   [ ] Trusted Timestamping for IP management
+*   [x] Timestamp and Finalization
 *   [ ] Note Version History (Git Integration)
 *   [ ] Custom Note Templates
 *   [ ] Export to PDF/HTML
