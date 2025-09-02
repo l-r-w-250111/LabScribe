@@ -6,7 +6,9 @@ class Settings:
         self.file_path = file_path
         self.defaults = {
             'username': 'Default User',
-            'save_folder': os.path.join(os.path.expanduser('~'), 'ELN_Notes')
+            'save_folder': os.path.join(os.path.expanduser('~'), 'ELN_Notes'),
+            'use_tsa': False,
+            'tsa_url': 'https://freetsa.org/tsr'
         }
         self.data = self.defaults.copy()
         self.load()
@@ -46,7 +48,7 @@ if __name__ == '__main__':
     print(f"Current username: {settings.get('username')}")
     print(f"Current save folder: {settings.get('save_folder')}")
     
-    # settings.set('username', 'My_Name')
+    # settings.set('username', 'Kazu')
     # settings.set('save_folder', 'C:\My_Notes')
     
     # print(f"Updated username: {settings.get('username')}")
