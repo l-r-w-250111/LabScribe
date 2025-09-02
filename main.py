@@ -28,8 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 # Local imports
-import certifi
-from rfc3161_client import TimestampRequestBuilder, decode_timestamp_response, VerifierBuilder, VerificationError
+from tsp_client import TSPSigner, TSPVerifier, SigningSettings
 from chart_widget import ChartWidget
 from table_widget import TableWidget
 from gantt_chart_widget import GanttChartWidget
@@ -1141,18 +1140,27 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "File Not Found", "The specified key file does not exist.")
             return
 
+        # Read the key file content once
+        with open(key_path, "rb") as key_file:
+            file_content = key_file.read()
+
+        # Check if the user selected a public certificate by mistake
+        if b'-----BEGIN CERTIFICATE-----' in file_content:
+            QMessageBox.critical(self, "Wrong File Type",
+                                 "You have selected a public certificate file.\n\nPlease select your private key file (it usually starts with '-----BEGIN PRIVATE KEY-----').")
+            return
+
         if not password:
             password, ok = QInputDialog.getText(self, "Enter Password", "Enter the password for your private key:", QLineEdit.EchoMode.Password)
             if not ok or not password:
                 return
 
         try:
-            with open(key_path, "rb") as key_file:
-                self.private_key = serialization.load_pem_private_key(
-                    key_file.read(),
-                    password=password.encode('utf-8'),
-                    backend=default_backend()
-                )
+            self.private_key = serialization.load_pem_private_key(
+                file_content,
+                password=password.encode('utf-8'),
+                backend=default_backend()
+            )
             # If successful, store path for next time
             self.settings.set('private_key_path', key_path)
 
@@ -2171,7 +2179,7 @@ class MainWindow(QMainWindow):
         # Hash the combined data (note content + timestamp)
         try:
             serialized_data = json.dumps(data_to_sign, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
-            h = hashlib.sha256(serialized_data).digest()
+            h = hashlib.sha512(serialized_data).digest()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to serialize data for hashing: {e}")
             return
@@ -2180,10 +2188,10 @@ class MainWindow(QMainWindow):
         signature = self.private_key.sign(
             h,
             padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
+                mgf=padding.MGF1(hashes.SHA512()),
                 salt_length=padding.PSS.MAX_LENGTH
             ),
-            hashes.SHA256()
+            hashes.SHA512()
         )
 
         # Get public key to store alongside the signature
@@ -2193,28 +2201,62 @@ class MainWindow(QMainWindow):
         )
 
         # --- Timestamping (if enabled) ---
-        timestamp_token = None
+        timestamp_request_b64 = None
+        timestamp_response_b64 = None
         if self.settings.get('use_tsa'):
             tsa_url = self.settings.get('tsa_url')
             if not tsa_url:
                 QMessageBox.warning(self, "Timestamping Failed", "TSA URL is not configured. Proceeding without timestamp.")
             else:
+                # Use temp files to interact with openssl
+                tmp_hash_file = None
+                tmp_tsq_file = None
                 try:
-                    # Build the timestamp request using the same hash we sign
-                    ts_request = TimestampRequestBuilder().data(h).build()
-                    # Make the request
+                    # 1. Write hash to a temporary file
+                    with tempfile.NamedTemporaryFile(mode='wb', delete=False) as tmp_hash_file:
+                        tmp_hash_file.write(h)
+
+                    # 2. Create timestamp request file (.tsq)
+                    with tempfile.NamedTemporaryFile(mode='w+b', delete=False, suffix='.tsq') as tmp_tsq_file:
+                        pass # Just need the name
+
+                    cmd_tsq = [
+                        "openssl", "ts", "-query",
+                        "-data", tmp_hash_file.name,
+                        "-no_nonce",
+                        "-sha512",
+                        "-out", tmp_tsq_file.name
+                    ]
+                    subprocess.run(cmd_tsq, check=True, capture_output=True)
+
+                    # 3. Send request to TSA server
+                    with open(tmp_tsq_file.name, 'rb') as f_tsq:
+                        tsq_content = f_tsq.read()
+
                     response = requests.post(
                         tsa_url,
-                        data=ts_request.as_bytes(),
+                        data=tsq_content,
                         headers={"Content-Type": "application/timestamp-query"},
-                        timeout=10 # Add a timeout
+                        timeout=10
                     )
                     response.raise_for_status()
-                    # We store the raw response content (the token)
-                    timestamp_token = response.content
+                    tsr_content = response.content
+
+                    # 4. Store request and response
+                    timestamp_request_b64 = base64.b64encode(tsq_content).decode('utf-8')
+                    timestamp_response_b64 = base64.b64encode(tsr_content).decode('utf-8')
                     print("Successfully received timestamp token.")
+
+                except FileNotFoundError:
+                    QMessageBox.critical(self, "Timestamping Error", "The 'openssl' command was not found.\nPlease ensure OpenSSL is installed and that its location is in your system's PATH.")
                 except Exception as e:
                     QMessageBox.warning(self, "Timestamping Failed", f"Could not get timestamp from {tsa_url}.\nError: {e}\n\nProceeding without timestamp.")
+                finally:
+                    # 5. Clean up temporary files
+                    if tmp_hash_file and os.path.exists(tmp_hash_file.name):
+                        os.remove(tmp_hash_file.name)
+                    if tmp_tsq_file and os.path.exists(tmp_tsq_file.name):
+                        os.remove(tmp_tsq_file.name)
 
         # Create signature file data
         signature_data = {
@@ -2222,8 +2264,9 @@ class MainWindow(QMainWindow):
             'signature': base64.b64encode(signature).decode('utf-8'),
             'finalized_timestamp': signing_timestamp,
         }
-        if timestamp_token:
-            signature_data['timestamp_token'] = base64.b64encode(timestamp_token).decode('utf-8')
+        if timestamp_request_b64 and timestamp_response_b64:
+            signature_data['timestamp_request'] = timestamp_request_b64
+            signature_data['timestamp_response'] = timestamp_response_b64
 
         try:
             with open(sig_path, "w", encoding="utf-8") as f:
@@ -2281,7 +2324,7 @@ class MainWindow(QMainWindow):
         # Calculate hash of the combined data
         try:
             serialized_data = json.dumps(data_to_verify, sort_keys=True, ensure_ascii=False, indent=None).encode('utf-8')
-            h = hashlib.sha256(serialized_data).digest()
+            h = hashlib.sha512(serialized_data).digest()
         except Exception as e:
             self.signal_label.setStyleSheet("background-color: #ffaa00; border-radius: 6px;") # Orange
             self.finalization_status_label.setText(f"Status: Hashing Error | Finalized: {display_timestamp}")
@@ -2295,10 +2338,10 @@ class MainWindow(QMainWindow):
                 signature,
                 h,
                 padding.PSS(
-                    mgf=padding.MGF1(hashes.SHA256()),
+                    mgf=padding.MGF1(hashes.SHA512()),
                     salt_length=padding.PSS.MAX_LENGTH
                 ),
-                hashes.SHA256()
+                hashes.SHA512()
             )
             # If we reach here, the signature is valid
             self.signal_label.setStyleSheet("background-color: #aaffaa; border-radius: 6px;") # Green
@@ -2307,39 +2350,56 @@ class MainWindow(QMainWindow):
             self.finalization_status_label.setStyleSheet("color: #aaffaa;")
 
             # --- Now, verify timestamp if it exists ---
-            if 'timestamp_token' in signature_data:
+            if 'timestamp_request' in signature_data and 'timestamp_response' in signature_data:
+                tmp_tsq_file = None
+                tmp_tsr_file = None
                 try:
-                    ts_token_b64 = signature_data['timestamp_token']
-                    ts_token_der = base64.b64decode(ts_token_b64)
-                    ts_response = decode_timestamp_response(ts_token_der)
+                    # 1. Decode request and response, write to temp files
+                    tsq_b64 = signature_data['timestamp_request']
+                    tsr_b64 = signature_data['timestamp_response']
+                    tsq_content = base64.b64decode(tsq_b64)
+                    tsr_content = base64.b64decode(tsr_b64)
 
-                    # Get trusted root certs from certifi
-                    with open(certifi.where(), "rb") as f:
-                        cert_authorities = serialization.load_pem_x509_certificates(f.read())
+                    with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.tsq') as tmp_tsq_file:
+                        tmp_tsq_file.write(tsq_content)
 
-                    # Check against all known CAs
-                    verified = False
-                    for cert in cert_authorities:
-                        builder = VerifierBuilder().add_root_certificate(cert)
-                        try:
-                            # Must build the verifier for each cert
-                            verifier = builder.build()
-                            verifier.verify(ts_response, data=h)
-                            verified = True
-                            break # Found a valid chain
-                        except VerificationError:
-                            continue # Try the next certificate
+                    with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.tsr') as tmp_tsr_file:
+                        tmp_tsr_file.write(tsr_content)
 
-                    if verified:
+                    # 2. Get paths to local certificate files
+                    base_dir = os.path.dirname(os.path.abspath(__file__))
+                    ca_path = os.path.join(base_dir, "freetsa_cacert.pem")
+                    untrusted_path = os.path.join(base_dir, "freetsa_tsa.crt")
+
+                    # 3. Call openssl to verify
+                    cmd_verify = [
+                        "openssl", "ts", "-verify",
+                        "-in", tmp_tsr_file.name,
+                        "-queryfile", tmp_tsq_file.name,
+                        "-CAfile", ca_path,
+                        "-untrusted", untrusted_path
+                    ]
+                    result = subprocess.run(cmd_verify, check=True, capture_output=True, text=True)
+
+                    if "Verification: OK" in result.stdout:
                         self.finalization_status_label.setText(f"{base_status_text} | Timestamp Verified")
                     else:
-                        self.finalization_status_label.setText(f"{base_status_text} | Timestamp UNVERIFIED")
-                        self.finalization_status_label.setStyleSheet("color: #ffaa00;") # Orange for unverified timestamp
+                        raise Exception(f"Verification failed. Output:\n{result.stdout}\n{result.stderr}")
 
+                except FileNotFoundError:
+                    QMessageBox.critical(self, "Timestamping Error", "The 'openssl' command was not found.\nPlease ensure OpenSSL is installed and that its location is in your system's PATH.")
+                    self.finalization_status_label.setText(f"{base_status_text} | Timestamp UNVERIFIED (openssl missing)")
+                    self.finalization_status_label.setStyleSheet("color: #ffaa00;")
                 except Exception as ts_e:
-                    print(f"Timestamp verification error: {ts_e}")
-                    self.finalization_status_label.setText(f"{base_status_text} | Timestamp Invalid/Error")
-                    self.finalization_status_label.setStyleSheet("color: #ffaa00;") # Orange for error
+                    print(f"Timestamp verification failed: {ts_e}")
+                    self.finalization_status_label.setText(f"{base_status_text} | Timestamp UNVERIFIED")
+                    self.finalization_status_label.setStyleSheet("color: #ffaa00;") # Orange for unverified timestamp
+                finally:
+                    # 4. Clean up temporary files
+                    if tmp_tsq_file and os.path.exists(tmp_tsq_file.name):
+                        os.remove(tmp_tsq_file.name)
+                    if tmp_tsr_file and os.path.exists(tmp_tsr_file.name):
+                        os.remove(tmp_tsr_file.name)
 
         except Exception as e: # Catches InvalidSignature and other potential errors
             self.signal_label.setStyleSheet("background-color: #ff5555; border-radius: 6px;") # Red

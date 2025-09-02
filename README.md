@@ -40,10 +40,9 @@ The application includes **AI-powered summarization**, a full **Project Manageme
     ```sh
     npm install -g @mermaid-js/mermaid-cli
     ```
-*   **System Dependencies (for Linux):** The application requires certain Qt libraries to run. On Debian/Ubuntu-based systems, you can install them with:
-    ```sh
-    sudo apt-get update && sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1
-    ```
+*   **OpenSSL:** The Trusted Timestamping feature requires `openssl` to be installed and available in the system's PATH.
+    *   **Linux/macOS:** OpenSSL is usually pre-installed.
+    *   **Windows:** You can install OpenSSL using a pre-compiled binary from a source like [slproweb.com/products/Win32OpenSSL.html](https://slproweb.com/products/Win32OpenSSL.html).
 
 ### 2. Installation & Setup
 
