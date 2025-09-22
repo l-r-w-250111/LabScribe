@@ -96,9 +96,10 @@ class ProjectView(QWidget):
 
     def _update_chart(self):
         """Updates the Gantt chart from the editor's content."""
+        country_code = self.main_window.settings.get('holiday_country')
         gantt_data = self.gantt_data_editor.toPlainText()
         lines = gantt_data.strip().split('\n')
-        self.gantt_chart_widget.update_plot(lines)
+        self.gantt_chart_widget.update_plot(lines, country_code=country_code)
 
     def _refresh_linked_notes(self):
         """Scans all notes and populates the list with notes linked to this project."""

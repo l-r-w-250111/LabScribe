@@ -287,10 +287,11 @@ class GanttChartModuleWidget(BaseModuleWidget):
         self.text_edit.setFixedHeight(max(int(doc_height + 20), int(min_height)))
 
     def update_chart(self):
+        country_code = self.main_window.settings.get('holiday_country')
         data = self.content.get("data", "")
         lines = data.strip().split('\n')
-        # Pass the raw lines to the widget; it will handle all parsing.
-        self.gantt_chart_widget.update_plot(lines)
+        # Pass the raw lines and country code to the widget.
+        self.gantt_chart_widget.update_plot(lines, country_code=country_code)
 
 
 # --- Metadata Module ---
@@ -909,6 +910,14 @@ class SettingsDialog(QDialog):
         save_folder_layout.addWidget(browse_button)
         general_layout.addRow("Save Folder:", save_folder_layout)
 
+        # Holiday Country
+        self.holiday_country_edit = QLineEdit(self.settings.get('holiday_country'))
+        self.holiday_country_edit.textChanged.connect(self.update_holiday_country)
+        general_layout.addRow("Gantt Chart Holiday Country:", self.holiday_country_edit)
+        helper_label = QLabel("2-letter code (e.g., US, JP, GB). See python-holidays docs for a full list.")
+        helper_label.setStyleSheet("font-size: 11px; color: #999;")
+        general_layout.addRow("", helper_label)
+
         tabs.addTab(general_tab, "General")
 
         # --- AI & Indexing Tab ---
@@ -979,6 +988,9 @@ class SettingsDialog(QDialog):
 
     def update_username(self, new_username):
         self.settings.set('username', new_username)
+
+    def update_holiday_country(self, country_code):
+        self.settings.set('holiday_country', country_code)
 
     def browse_save_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Save Folder", self.settings.get('save_folder'))

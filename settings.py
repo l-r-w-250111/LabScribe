@@ -8,7 +8,8 @@ class Settings:
             'username': 'Default User',
             'save_folder': os.path.join(os.path.expanduser('~'), 'ELN_Notes'),
             'use_tsa': False,
-            'tsa_url': 'https://freetsa.org/tsr'
+            'tsa_url': 'https://freetsa.org/tsr',
+            'holiday_country': 'US'
         }
         self.data = self.defaults.copy()
         self.load()

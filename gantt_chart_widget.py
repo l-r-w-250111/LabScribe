@@ -41,7 +41,7 @@ class GanttChartWidget(QWidget):
                 pass
         raise ValueError(f"Date '{date_string}' could not be parsed.")
 
-    def update_plot(self, lines):
+    def update_plot(self, lines, country_code='US'):
         """Updates the plot with new task data."""
         self.axes.clear()
 
@@ -103,13 +103,25 @@ class GanttChartWidget(QWidget):
         y_pos = range(len(task_names))
         self.axes.barh(y_pos, durations, left=[mdates.date2num(sd) for sd in start_dates], align='center', height=0.5)
 
+        # --- Holiday Setup ---
+        try:
+            # Dynamically get the holiday class for the given country code
+            holiday_class = getattr(holidays, country_code)
+        except AttributeError:
+            print(f"Warning: Invalid holiday country code '{country_code}'. Defaulting to 'US'.")
+            holiday_class = holidays.US
+        
+        # Create one holiday object for the required year range
+        min_year = min(start_dates).year
+        max_year = max(end_dates).year
+        country_holidays = holiday_class(years=list(range(min_year, max_year + 2)))
+
         # --- Operating Day Calculation and Display ---
-        jp_holidays_for_calc = holidays.JP(years=list(range(min(start_dates).year, max(end_dates).year + 2)))
         for i, task in enumerate(parsed_tasks):
             operating_days = 0
             current_day = task['start']
             while current_day <= task['end']:
-                if not (current_day.weekday() >= 5 or current_day in jp_holidays_for_calc):
+                if not (current_day.weekday() >= 5 or current_day in country_holidays):
                     operating_days += 1
                 current_day += timedelta(days=1)
             
@@ -125,13 +137,9 @@ class GanttChartWidget(QWidget):
         min_date = min(start_dates)
         max_date = max(end_dates)
         
-        # We can reuse the holidays object from the calculation if we make its scope broader,
-        # but for clarity, we'll keep it separate for now.
-        jp_holidays = holidays.JP(years=range(min_date.year, max_date.year + 2))
-        
         current_date = min_date
         while current_date <= max_date:
-            if current_date.weekday() >= 5 or current_date in jp_holidays:
+            if current_date.weekday() >= 5 or current_date in country_holidays:
                 self.axes.axvspan(mdates.date2num(current_date) - 0.5, 
                                   mdates.date2num(current_date) + 0.5, 
                                       facecolor='#fac8d2', alpha=0.5)
