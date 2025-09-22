@@ -118,6 +118,13 @@ class ProjectView(QWidget):
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         note_data = json.load(f)
+
+                        # Data Validation: Ensure the note_data is a dictionary.
+                        # If not, it might be a corrupted note file.
+                        if not isinstance(note_data, dict):
+                            print(f"Warning: Skipping note file with unexpected format: {filename}")
+                            continue
+
                         for module in note_data.get("modules", []):
                             # Check for the specific metadata module
                             if module.get("type") == "Experiment Metadata":

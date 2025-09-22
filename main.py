@@ -1395,7 +1395,8 @@ class MainWindow(QMainWindow):
             cache_mtime = os.path.getmtime(cache_path)
             is_stale = False
             for filename in os.listdir(save_folder):
-                if filename.endswith(".json"):
+                # Only check actual note files for staleness
+                if filename.endswith(".json") and not filename.endswith(".project.json") and filename != "samples.json":
                     file_path = os.path.join(save_folder, filename)
                     if os.path.getmtime(file_path) > cache_mtime:
                         is_stale = True
@@ -1413,11 +1414,18 @@ class MainWindow(QMainWindow):
             return all_metadata
 
         for filename in os.listdir(save_folder):
-            if filename.endswith(".json"):
+            # Only aggregate from note files, not project or sample files.
+            if filename.endswith(".json") and not filename.endswith(".project.json") and filename != "samples.json":
                 file_path = os.path.join(save_folder, filename)
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         note_data = json.load(f)
+
+                        # Data Validation: Ensure the note_data is a dictionary.
+                        if not isinstance(note_data, dict):
+                            print(f"Warning: Skipping metadata aggregation for file with unexpected format: {filename}")
+                            continue
+
                         for module in note_data.get("modules", []):
                             if module.get("type") == METADATA_MODULE_TYPE:
                                 all_metadata.append(module.get("content", {}))
